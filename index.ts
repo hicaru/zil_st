@@ -26,6 +26,7 @@ interface StakedNode {
   direct_deposit: bigint;
   buffer_deposit: bigint;
   deleg_stake_per_cycle: bigint;
+  stake_ssn_per_cycle: bigint;
   rewards: bigint;
 }
 
@@ -111,6 +112,7 @@ async function getStakedNodesForUser(ssns: SSNode[]): Promise<StakedNode[]> {
         buffer_deposit: 0n,
         deleg_stake_per_cycle: 0n,
         rewards: 0n,
+        stake_ssn_per_cycle: 0n,
       });
     }
   }
@@ -121,38 +123,56 @@ async function getStakedNodesForUser(ssns: SSNode[]): Promise<StakedNode[]> {
 async function getRewardRelatedDataBatch(stakedNodes: StakedNode[]): Promise<StakedNode[]> {
   const USER_ADDRESS_LOWER = USER_ADDRESS.toLowerCase();
   const batchRequests: RpcRequest[] = stakedNodes.flatMap((node, index) => [
+    // Три существующих запроса
     {
       jsonrpc: '2.0',
       method: 'GetSmartContractSubState',
       params: [CONTRACT_IMPL, 'direct_deposit_deleg', [USER_ADDRESS_LOWER, node.node.address]],
-      id: index * 3 + 1,
+      id: index * 5 + 1,
     },
     {
       jsonrpc: '2.0',
       method: 'GetSmartContractSubState',
       params: [CONTRACT_IMPL, 'buff_deposit_deleg', [USER_ADDRESS_LOWER, node.node.address]],
-      id: index * 3 + 2,
+      id: index * 5 + 2,
     },
     {
       jsonrpc: '2.0',
       method: 'GetSmartContractSubState',
       params: [CONTRACT_IMPL, 'deleg_stake_per_cycle', [USER_ADDRESS_LOWER, node.node.address]],
-      id: index * 3 + 3,
+      id: index * 5 + 3,
+    },
+    // Два новых запроса
+    {
+      jsonrpc: '2.0',
+      method: 'GetSmartContractSubState',
+      params: [CONTRACT_IMPL, 'stake_ssn_per_cycle', [node.node.address]],
+      id: index * 5 + 4,
+    },
+    {
+      jsonrpc: '2.0',
+      method: 'GetSmartContractSubState',
+      params: [CONTRACT_IMPL, 'deleg_stake_per_cycle', [USER_ADDRESS_LOWER, node.node.address]],
+      id: index * 5 + 5,
     }
   ]);
 
   const results = await callJsonRPC(batchRequests);
 
   for (let i = 0; i < stakedNodes.length; i++) {
-    const directRes = results[i * 3];
-    const buffRes = results[i * 3 + 1];
-    const cycleRes = results[i * 3 + 2];
+    const directRes = results[i * 5];
+    const buffRes = results[i * 5 + 1];
+    const cycleRes = results[i * 5 + 2];
+    const stakeSsnCycleRes = results[i * 5 + 3]; 
+    const delegCycleRes2 = results[i * 5 + 4];   
 
     const keyDirect = 'direct_deposit_deleg';
     const keyBuff = 'buff_deposit_deleg';
     const keyCycle = 'deleg_stake_per_cycle';
+    const keyStakeSsnCycle = 'stake_ssn_per_cycle';
 
     try {
+      // Обработка direct_deposit
       if (
         directRes?.result &&
         directRes.result[keyDirect] &&
@@ -165,6 +185,7 @@ async function getRewardRelatedDataBatch(stakedNodes: StakedNode[]): Promise<Sta
         }
       }
 
+      // Обработка buffer_deposit
       if (
         buffRes?.result &&
         buffRes.result[keyBuff] &&
@@ -177,6 +198,7 @@ async function getRewardRelatedDataBatch(stakedNodes: StakedNode[]): Promise<Sta
         }
       }
 
+      // Обработка deleg_stake_per_cycle (первый запрос)
       if (
         cycleRes?.result &&
         cycleRes.result[keyCycle] &&
@@ -188,6 +210,34 @@ async function getRewardRelatedDataBatch(stakedNodes: StakedNode[]): Promise<Sta
           stakedNodes[i].deleg_stake_per_cycle = BigInt(deposits[lastKey]);
         }
       }
+
+      // Обработка stake_ssn_per_cycle (новый)
+      if (
+        stakeSsnCycleRes?.result &&
+        stakeSsnCycleRes.result[keyStakeSsnCycle]?.[stakedNodes[i].node.address]
+      ) {
+        const ssnCycleData = stakeSsnCycleRes.result[keyStakeSsnCycle][stakedNodes[i].node.address];
+        const lastKey = Object.keys(ssnCycleData).sort().pop();
+        if (lastKey) {
+          const totalStake = BigInt(ssnCycleData[lastKey].arguments[0]);
+          stakedNodes[i].stake_ssn_per_cycle = totalStake;
+        }
+      }
+
+      // Обработка deleg_stake_per_cycle (второй запрос) — если нужно
+      // (может быть тем же, что и первый, но можно использовать как резерв)
+      if (
+        delegCycleRes2?.result &&
+        delegCycleRes2.result[keyCycle] &&
+        delegCycleRes2.result[keyCycle][USER_ADDRESS_LOWER]?.[stakedNodes[i].node.address]
+      ) {
+        const deposits = delegCycleRes2.result[keyCycle][USER_ADDRESS_LOWER][stakedNodes[i].node.address];
+        const lastKey = Object.keys(deposits).sort().pop();
+        if (lastKey) {
+          stakedNodes[i].deleg_stake_per_cycle = BigInt(deposits[lastKey]);
+        }
+      }
+
     } catch (e) {
       console.error(`Ошибка при обработке данных для ноды ${stakedNodes[i].node.name}:`, e);
     }
