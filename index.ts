@@ -1,5 +1,10 @@
 import fetch from 'node-fetch';
 
+const KEY_STAKE_SSN_PER_CYCLE = 'stake_ssn_per_cycle';
+const KEY_DELEG_STAKE_PER_CYCLE = 'deleg_stake_per_cycle';
+const KEY_LAST_REWARD_CYCLE = 'lastrewardcycle';
+const KEY_LAST_WITHDRAW_CYCLE = 'last_withdraw_cycle_deleg';
+
 interface RpcRequest {
   jsonrpc: string;
   method: string;
@@ -11,6 +16,8 @@ interface SSNode {
   name: string;
   url: string;
   address: string;
+  lastrewardcycle: bigint;
+  lastWithdrawCcleDleg: bigint;
 }
 
 interface StakedNode {
@@ -19,6 +26,7 @@ interface StakedNode {
   direct_deposit: bigint;
   buffer_deposit: bigint;
   deleg_stake_per_cycle: bigint;
+  rewards: bigint;
 }
 
 // === Конфиг ===
@@ -44,12 +52,28 @@ async function getSSNList(): Promise<SSNode[]> {
       params: [CONTRACT_IMPL, 'ssnlist', []],
       id: 1,
     },
+    {
+      jsonrpc: '2.0',
+      method: 'GetSmartContractSubState',
+      params: [CONTRACT_IMPL, KEY_LAST_REWARD_CYCLE, []],
+      id: 1,
+    },
+    {
+      jsonrpc: '2.0',
+      method: 'GetSmartContractSubState',
+      params: [CONTRACT_IMPL, KEY_LAST_WITHDRAW_CYCLE, [USER_ADDRESS]],
+      id: 1,
+    },
   ];
 
   const results = await callJsonRPC(batchRequests);
   const ssnlist = results[0].result['ssnlist'];
+  const lastrewardcycle = BigInt(results[1].result[KEY_LAST_REWARD_CYCLE]);
+  const lastWithdrawNodes = results[2].result[KEY_LAST_WITHDRAW_CYCLE][USER_ADDRESS];
 
   return Object.keys(ssnlist).map((key) => ({
+    lastrewardcycle,
+    lastWithdrawCcleDleg: lastWithdrawNodes[key] ? BigInt(lastWithdrawNodes[key]) : 0n,
     name: ssnlist[key].arguments[3],
     url: ssnlist[key].arguments[5],
     address: key,
@@ -86,6 +110,7 @@ async function getStakedNodesForUser(ssns: SSNode[]): Promise<StakedNode[]> {
         direct_deposit: 0n,
         buffer_deposit: 0n,
         deleg_stake_per_cycle: 0n,
+        rewards: 0n,
       });
     }
   }
