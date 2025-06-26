@@ -16,6 +16,9 @@ interface SSNode {
 interface StakedNode {
   node: SSNode;
   amount: bigint;
+  direct_deposit: bigint;
+  buffer_deposit: bigint;
+  deleg_stake_per_cycle: bigint;
 }
 
 // === Конфиг ===
@@ -80,6 +83,9 @@ async function getStakedNodesForUser(ssns: SSNode[]): Promise<StakedNode[]> {
       stakedNodes.push({
         node: node,
         amount: amountQA,
+        direct_deposit: 0n,
+        buffer_deposit: 0n,
+        deleg_stake_per_cycle: 0n,
       });
     }
   }
@@ -87,47 +93,89 @@ async function getStakedNodesForUser(ssns: SSNode[]): Promise<StakedNode[]> {
   return stakedNodes;
 }
 
-async function getRewardRelatedDataBatch(
-  userAddress: string,
-  ssnAddress: string,
-): Promise<any> {
-  const batchRequests: RpcRequest[] = [
+async function getRewardRelatedDataBatch(stakedNodes: StakedNode[]): Promise<StakedNode[]> {
+  const USER_ADDRESS_LOWER = USER_ADDRESS.toLowerCase();
+  const batchRequests: RpcRequest[] = stakedNodes.flatMap((node, index) => [
     {
       jsonrpc: '2.0',
       method: 'GetSmartContractSubState',
-      params: [CONTRACT_IMPL, 'direct_deposit_deleg', [userAddress, ssnAddress]],
-      id: 1,
+      params: [CONTRACT_IMPL, 'direct_deposit_deleg', [USER_ADDRESS_LOWER, node.node.address]],
+      id: index * 3 + 1,
     },
     {
       jsonrpc: '2.0',
       method: 'GetSmartContractSubState',
-      params: [CONTRACT_IMPL, 'buff_deposit_deleg', [userAddress, ssnAddress]],
-      id: 2,
+      params: [CONTRACT_IMPL, 'buff_deposit_deleg', [USER_ADDRESS_LOWER, node.node.address]],
+      id: index * 3 + 2,
     },
     {
       jsonrpc: '2.0',
       method: 'GetSmartContractSubState',
-      params: [CONTRACT_IMPL, 'deleg_stake_per_cycle', [userAddress, ssnAddress]],
-      id: 3,
+      params: [CONTRACT_IMPL, 'deleg_stake_per_cycle', [USER_ADDRESS_LOWER, node.node.address]],
+      id: index * 3 + 3,
     }
-  ];
+  ]);
 
-  const response = await fetch(RPC_URL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(batchRequests),
-  });
-  const result = await response.json();
+  const results = await callJsonRPC(batchRequests);
 
-  console.log(result);
+  for (let i = 0; i < stakedNodes.length; i++) {
+    const directRes = results[i * 3];
+    const buffRes = results[i * 3 + 1];
+    const cycleRes = results[i * 3 + 2];
 
+    const keyDirect = 'direct_deposit_deleg';
+    const keyBuff = 'buff_deposit_deleg';
+    const keyCycle = 'deleg_stake_per_cycle';
+
+    try {
+      if (
+        directRes?.result &&
+        directRes.result[keyDirect] &&
+        directRes.result[keyDirect][USER_ADDRESS_LOWER]?.[stakedNodes[i].node.address]
+      ) {
+        const deposits = directRes.result[keyDirect][USER_ADDRESS_LOWER][stakedNodes[i].node.address];
+        const lastKey = Object.keys(deposits).sort().pop();
+        if (lastKey) {
+          stakedNodes[i].direct_deposit = BigInt(deposits[lastKey]);
+        }
+      }
+
+      if (
+        buffRes?.result &&
+        buffRes.result[keyBuff] &&
+        buffRes.result[keyBuff][USER_ADDRESS_LOWER]?.[stakedNodes[i].node.address]
+      ) {
+        const deposits = buffRes.result[keyBuff][USER_ADDRESS_LOWER][stakedNodes[i].node.address];
+        const lastKey = Object.keys(deposits).sort().pop();
+        if (lastKey) {
+          stakedNodes[i].buffer_deposit = BigInt(deposits[lastKey]);
+        }
+      }
+
+      if (
+        cycleRes?.result &&
+        cycleRes.result[keyCycle] &&
+        cycleRes.result[keyCycle][USER_ADDRESS_LOWER]?.[stakedNodes[i].node.address]
+      ) {
+        const deposits = cycleRes.result[keyCycle][USER_ADDRESS_LOWER][stakedNodes[i].node.address];
+        const lastKey = Object.keys(deposits).sort().pop();
+        if (lastKey) {
+          stakedNodes[i].deleg_stake_per_cycle = BigInt(deposits[lastKey]);
+        }
+      }
+    } catch (e) {
+      console.error(`Ошибка при обработке данных для ноды ${stakedNodes[i].node.name}:`, e);
+    }
+  }
+
+  return stakedNodes;
 }
 
 (async function () {
   const list = await getSSNList();
   const staked = await getStakedNodesForUser(list);
 
-  await getRewardRelatedDataBatch(USER_ADDRESS, "0xc3ed69338765424f4771dd636a5d3bfa0a776a35");
+  await getRewardRelatedDataBatch(staked);
 
   console.log(staked);
 }())
