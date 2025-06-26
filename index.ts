@@ -1,9 +1,8 @@
 import fetch from 'node-fetch';
 
-const KEY_STAKE_SSN_PER_CYCLE = 'stake_ssn_per_cycle';
-const KEY_DELEG_STAKE_PER_CYCLE = 'deleg_stake_per_cycle';
 const KEY_LAST_REWARD_CYCLE = 'lastrewardcycle';
 const KEY_LAST_WITHDRAW_CYCLE = 'last_withdraw_cycle_deleg';
+const KEY_BALANCE_ZRC2 = 'balances';
 
 interface RpcRequest {
   jsonrpc: string;
@@ -28,11 +27,13 @@ interface StakedNode {
   deleg_stake_per_cycle: bigint;
   stake_ssn_per_cycle: bigint;
   rewards: bigint;
+  stzil: bigint;
 }
 
 // === Конфиг ===
 const RPC_URL = 'http://188.234.213.4:4202';
 const CONTRACT_IMPL = 'a7C67D49C82c7dc1B73D231640B2e4d0661D37c1';
+const ST_ZIL_IMPL = 'e6f14afc8739a4ead0a542c07d3ff978190e3b92';
 const USER_ADDRESS = '0x77e27c39ce572283b848e2cdf32cce761e34fa49';
 
 async function callJsonRPC(requests: RpcRequest[]): Promise<any> {
@@ -57,13 +58,13 @@ async function getSSNList(): Promise<SSNode[]> {
       jsonrpc: '2.0',
       method: 'GetSmartContractSubState',
       params: [CONTRACT_IMPL, KEY_LAST_REWARD_CYCLE, []],
-      id: 1,
+      id: 2,
     },
     {
       jsonrpc: '2.0',
       method: 'GetSmartContractSubState',
       params: [CONTRACT_IMPL, KEY_LAST_WITHDRAW_CYCLE, [USER_ADDRESS]],
-      id: 1,
+      id: 3,
     },
   ];
 
@@ -113,6 +114,7 @@ async function getStakedNodesForUser(ssns: SSNode[]): Promise<StakedNode[]> {
         deleg_stake_per_cycle: 0n,
         rewards: 0n,
         stake_ssn_per_cycle: 0n,
+        stzil: 0n,
       });
     }
   }
@@ -141,8 +143,7 @@ async function getRewardRelatedDataBatch(stakedNodes: StakedNode[]): Promise<Sta
       method: 'GetSmartContractSubState',
       params: [CONTRACT_IMPL, 'deleg_stake_per_cycle', [USER_ADDRESS_LOWER, node.node.address]],
       id: index * 5 + 3,
-    },
-    // Два новых запроса
+    }, // Два новых запроса
     {
       jsonrpc: '2.0',
       method: 'GetSmartContractSubState',
@@ -154,17 +155,24 @@ async function getRewardRelatedDataBatch(stakedNodes: StakedNode[]): Promise<Sta
       method: 'GetSmartContractSubState',
       params: [CONTRACT_IMPL, 'deleg_stake_per_cycle', [USER_ADDRESS_LOWER, node.node.address]],
       id: index * 5 + 5,
-    }
+    },
+    {
+      jsonrpc: '2.0',
+      method: 'GetSmartContractSubState',
+      params: [ST_ZIL_IMPL, KEY_BALANCE_ZRC2, [USER_ADDRESS]],
+      id: index * 5 + 6,
+    },
   ]);
 
   const results = await callJsonRPC(batchRequests);
 
   for (let i = 0; i < stakedNodes.length; i++) {
-    const directRes = results[i * 5];
-    const buffRes = results[i * 5 + 1];
-    const cycleRes = results[i * 5 + 2];
-    const stakeSsnCycleRes = results[i * 5 + 3]; 
-    const delegCycleRes2 = results[i * 5 + 4];   
+    const directRes = results[i * 6];     // индекс 0
+    const buffRes = results[i * 6 + 1];   // индекс 1
+    const cycleRes = results[i * 6 + 2];  // индекс 2
+    const stakeSsnCycleRes = results[i * 6 + 3];  // индекс 3
+    const delegCycleRes2 = results[i * 6 + 4];    // индекс 4
+    const zrc2BalanceRes = results[i * 6 + 5];    // индекс 5 — НОВОЕ
 
     const keyDirect = 'direct_deposit_deleg';
     const keyBuff = 'buff_deposit_deleg';
@@ -172,7 +180,7 @@ async function getRewardRelatedDataBatch(stakedNodes: StakedNode[]): Promise<Sta
     const keyStakeSsnCycle = 'stake_ssn_per_cycle';
 
     try {
-      // Обработка direct_deposit
+      // --- Обработка direct_deposit ---
       if (
         directRes?.result &&
         directRes.result[keyDirect] &&
@@ -185,7 +193,7 @@ async function getRewardRelatedDataBatch(stakedNodes: StakedNode[]): Promise<Sta
         }
       }
 
-      // Обработка buffer_deposit
+      // --- Обработка buffer_deposit ---
       if (
         buffRes?.result &&
         buffRes.result[keyBuff] &&
@@ -198,7 +206,7 @@ async function getRewardRelatedDataBatch(stakedNodes: StakedNode[]): Promise<Sta
         }
       }
 
-      // Обработка deleg_stake_per_cycle (первый запрос)
+      // --- Обработка deleg_stake_per_cycle (первый запрос) ---
       if (
         cycleRes?.result &&
         cycleRes.result[keyCycle] &&
@@ -211,7 +219,7 @@ async function getRewardRelatedDataBatch(stakedNodes: StakedNode[]): Promise<Sta
         }
       }
 
-      // Обработка stake_ssn_per_cycle (новый)
+      // --- Обработка stake_ssn_per_cycle ---
       if (
         stakeSsnCycleRes?.result &&
         stakeSsnCycleRes.result[keyStakeSsnCycle]?.[stakedNodes[i].node.address]
@@ -224,8 +232,7 @@ async function getRewardRelatedDataBatch(stakedNodes: StakedNode[]): Promise<Sta
         }
       }
 
-      // Обработка deleg_stake_per_cycle (второй запрос) — если нужно
-      // (может быть тем же, что и первый, но можно использовать как резерв)
+      // --- Обработка deleg_stake_per_cycle (второй запрос) ---
       if (
         delegCycleRes2?.result &&
         delegCycleRes2.result[keyCycle] &&
@@ -236,6 +243,17 @@ async function getRewardRelatedDataBatch(stakedNodes: StakedNode[]): Promise<Sta
         if (lastKey) {
           stakedNodes[i].deleg_stake_per_cycle = BigInt(deposits[lastKey]);
         }
+      }
+
+      if (
+        zrc2BalanceRes?.result &&
+        zrc2BalanceRes.result[KEY_BALANCE_ZRC2] &&
+        zrc2BalanceRes.result[KEY_BALANCE_ZRC2][USER_ADDRESS]
+      ) {
+        const balance = zrc2BalanceRes.result[KEY_BALANCE_ZRC2][USER_ADDRESS];
+        stakedNodes[i].stzil = BigInt(balance || 0);
+      } else {
+        stakedNodes[i].stzil = 0n;
       }
 
     } catch (e) {
