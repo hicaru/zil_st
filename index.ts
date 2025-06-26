@@ -34,7 +34,7 @@ interface StakedNode {
 const RPC_URL = 'http://188.234.213.4:4202';
 const CONTRACT_IMPL = 'a7C67D49C82c7dc1B73D231640B2e4d0661D37c1';
 const ST_ZIL_IMPL = 'e6f14afc8739a4ead0a542c07d3ff978190e3b92';
-const USER_ADDRESS = '0x77e27c39ce572283b848e2cdf32cce761e34fa49';
+const USER_ADDRESS = '0x46Ede3060432ef81594F575E4eB2e6B535b062ef';
 
 async function callJsonRPC(requests: RpcRequest[]): Promise<any> {
   const response = await fetch(RPC_URL, {
@@ -71,7 +71,7 @@ async function getSSNList(): Promise<SSNode[]> {
   const results = await callJsonRPC(batchRequests);
   const ssnlist = results[0].result['ssnlist'];
   const lastrewardcycle = BigInt(results[1].result[KEY_LAST_REWARD_CYCLE]);
-  const lastWithdrawNodes = results[2].result[KEY_LAST_WITHDRAW_CYCLE][USER_ADDRESS];
+  const lastWithdrawNodes = results[2].result ? results[2].result[KEY_LAST_WITHDRAW_CYCLE][USER_ADDRESS] : 0;
 
   return Object.keys(ssnlist).map((key) => ({
     lastrewardcycle,
