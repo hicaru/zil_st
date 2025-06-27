@@ -1,6 +1,5 @@
 import fetch from 'node-fetch';
 import {
-    type Abi,
     encodeFunctionData,
     decodeFunctionResult,
     type Address,
@@ -73,6 +72,14 @@ interface EvmPool {
     tokenSymbol: string;
 }
 
+// Структура для хранения статистики пула
+interface EvmPoolStats {
+    tvl?: bigint;
+    pool_stake?: bigint;
+    commission_num?: bigint;
+    commission_den?: bigint;
+}
+
 // Финальный результат
 interface FinalOutput {
     name: string;
@@ -81,6 +88,8 @@ interface FinalOutput {
     tokenAddress?: string;
     deleg_amt: bigint;
     rewards: bigint;
+    tvl?: string;         // Total Value Locked (форматированный)
+    vote_power?: number;  // Vote Power в процентах
     apr?: number;
     tag: 'scilla' | 'avely' | 'evm';
 }
@@ -98,6 +107,13 @@ const erc20Abi = [
         inputs: [{ type: 'address', name: 'account' }],
         outputs: [{ type: 'uint256', name: 'balance' }],
     },
+    {
+        name: 'totalSupply',
+        type: 'function',
+        stateMutability: 'view',
+        inputs: [],
+        outputs: [{ type: 'uint256' }],
+    }
 ] as const;
 
 const nonLiquidDelegatorAbi = [
@@ -115,6 +131,13 @@ const nonLiquidDelegatorAbi = [
         inputs: [],
         outputs: [{ internalType: 'uint256', name: '', type: 'uint256' }],
     },
+    {
+        name: 'getDelegatedTotal', // Для TVL неликвидных пулов
+        type: 'function',
+        stateMutability: 'view',
+        inputs: [],
+        outputs: [{ type: 'uint256' }],
+    }
 ] as const;
 
 const depositAbi = [
@@ -237,7 +260,8 @@ function calculate_rewards(delegate_per_cycle: Map<number, bigint>, need_list: n
 (async function main() {
     let batchIdCounter = 1;
     const batchRequests: RpcRequest[] = [];
-    const evmRequestMap = new Map<string, { pool: EvmPool, reqType: 'deleg_amt' | 'rewards' | 'pool_stake' | 'commission' }>();
+    // Тип запроса теперь включает TVL
+    const evmRequestMap = new Map<string, { pool: EvmPool, reqType: 'deleg_amt' | 'rewards' | 'pool_stake' | 'commission' | 'tvl' }>();
 
 
     // --- 1.1. Добавляем Scilla и Avely запросы в пакет ---
@@ -252,14 +276,13 @@ function calculate_rewards(delegate_per_cycle: Map<number, bigint>, need_list: n
         { jsonrpc: '2.0', method: 'GetSmartContractSubState', params: [SCILLA_GZIL_CONTRACT, KEY_LAST_REWARD_CYCLE, []], id: SCILLA_ID_REWARD_CYCLE },
         { jsonrpc: '2.0', method: 'GetSmartContractSubState', params: [SCILLA_GZIL_CONTRACT, KEY_LAST_WITHDRAW_CYCLE, [SCILLA_USER_ADDRESS]], id: SCILLA_ID_WITHDRAW_CYCLE },
         { jsonrpc: '2.0', method: 'GetSmartContractSubState', params: [ST_ZIL_CONTRACT, 'balances', [SCILLA_USER_ADDRESS_LOWER]], id: AVELY_ID_STZIL_BALANCE },
-        // Запрос на общий стейк в сети (для расчета APR)
+        // Запрос на общий стейк в сети (для расчета APR и Vote Power)
         { jsonrpc: '2.0', method: 'eth_call', params: [{ to: DEPOSIT_ADDRESS, data: encodeFunctionData({ abi: depositAbi, functionName: 'getFutureTotalStake' }) }, 'latest'], id: EVM_ID_TOTAL_STAKE }
     );
 
     // --- 1.2. Добавляем EVM запросы в пакет ---
     protoMainnetPools.forEach(pool => {
         // --- Запросы для пользователя ---
-        // Запрос на сумму стейкинга пользователя (deleg_amt)
         const delegAmtId = batchIdCounter++;
         if (pool.poolType === StakingPoolType.LIQUID) {
             batchRequests.push({
@@ -276,7 +299,6 @@ function calculate_rewards(delegate_per_cycle: Map<number, bigint>, need_list: n
         }
         evmRequestMap.set(String(delegAmtId), { pool, reqType: 'deleg_amt' });
 
-        // Запрос на награды пользователя (только для NORMAL пулов)
         if (pool.poolType === StakingPoolType.NORMAL) {
             const rewardsId = batchIdCounter++;
             batchRequests.push({
@@ -287,8 +309,28 @@ function calculate_rewards(delegate_per_cycle: Map<number, bigint>, need_list: n
             evmRequestMap.set(String(rewardsId), { pool, reqType: 'rewards' });
         }
 
-        // --- Запросы для расчета APR пула ---
-        // Запрос на общий стейк пула
+        // --- Запросы для статистики пула (TVL, Vote Power, APR) ---
+        
+        // Запрос на TVL пула
+        const tvlId = batchIdCounter++;
+        if (pool.poolType === StakingPoolType.LIQUID) {
+            // Для ликвидных пулов TVL - это totalSupply их LST токена
+            batchRequests.push({
+                jsonrpc: '2.0', method: 'eth_call',
+                params: [{ to: pool.tokenAddress, data: encodeFunctionData({ abi: erc20Abi, functionName: 'totalSupply' }) }, 'latest'],
+                id: tvlId,
+            });
+        } else { // NORMAL
+            // Для обычных пулов TVL - это getDelegatedTotal
+            batchRequests.push({
+                jsonrpc: '2.0', method: 'eth_call',
+                params: [{ to: pool.address, data: encodeFunctionData({ abi: nonLiquidDelegatorAbi, functionName: 'getDelegatedTotal' }) }, 'latest'],
+                id: tvlId,
+            });
+        }
+        evmRequestMap.set(String(tvlId), { pool, reqType: 'tvl' });
+        
+        // Запрос на общий стейк пула (для Vote Power и APR)
         const poolStakeId = batchIdCounter++;
         batchRequests.push({
             jsonrpc: '2.0', method: 'eth_call',
@@ -297,7 +339,7 @@ function calculate_rewards(delegate_per_cycle: Map<number, bigint>, need_list: n
         });
         evmRequestMap.set(String(poolStakeId), { pool, reqType: 'pool_stake' });
 
-        // Запрос на комиссию пула
+        // Запрос на комиссию пула (для APR)
         const commissionId = batchIdCounter++;
         batchRequests.push({
             jsonrpc: '2.0', method: 'eth_call',
@@ -316,8 +358,9 @@ function calculate_rewards(delegate_per_cycle: Map<number, bigint>, need_list: n
 
     // --- 3. Обработка результатов ---
     const finalOutput: FinalOutput[] = [];
-    const tempEvmData = new Map<string, Partial<FinalOutput>>();
-    const tempEvmCalcData = new Map<string, { pool_stake?: bigint, commission_num?: bigint, commission_den?: bigint }>();
+    // Разделяем данные пользователя и статистику пулов для чистоты
+    const tempEvmUserData = new Map<string, { deleg_amt: bigint, rewards: bigint }>();
+    const tempEvmPoolStats = new Map<string, EvmPoolStats>();
 
     // --- 3.1. Обработка EVM результатов ---
     const totalNetworkStakeResponse = resultsById.get(EVM_ID_TOTAL_STAKE);
@@ -332,59 +375,102 @@ function calculate_rewards(delegate_per_cycle: Map<number, bigint>, need_list: n
             continue;
         }
 
-        const entry = tempEvmData.get(pool.id) ?? { name: pool.name, url: "", address: pool.address, tokenAddress: pool.tokenAddress, deleg_amt: 0n, rewards: 0n, tag: 'evm' };
-        const calcEntry = tempEvmCalcData.get(pool.id) ?? {};
+        const userData = tempEvmUserData.get(pool.id) ?? { deleg_amt: 0n, rewards: 0n };
+        const poolStats = tempEvmPoolStats.get(pool.id) ?? {};
 
         try {
-            if (reqInfo.reqType === 'deleg_amt') {
-                const decoded = decodeFunctionResult({ abi: pool.poolType === 'LIQUID' ? erc20Abi : nonLiquidDelegatorAbi, functionName: pool.poolType === 'LIQUID' ? 'balanceOf' : 'getDelegatedAmount', data: res.result });
-                entry.deleg_amt = BigInt(decoded ?? 0);
-            } else if (reqInfo.reqType === 'rewards') {
-                const decoded = decodeFunctionResult({ abi: nonLiquidDelegatorAbi, functionName: 'rewards', data: res.result });
-                entry.rewards = BigInt(decoded ?? 0);
-            } else if (reqInfo.reqType === 'pool_stake') {
-                const decoded = decodeFunctionResult({ abi: evmDelegatorAbi, functionName: 'getStake', data: res.result });
-                calcEntry.pool_stake = BigInt(decoded ?? 0);
-            } else if (reqInfo.reqType === 'commission') {
-                const decoded = decodeFunctionResult({ abi: evmDelegatorAbi, functionName: 'getCommission', data: res.result });
-                if (Array.isArray(decoded)) {
-                    calcEntry.commission_num = BigInt(decoded[0] ?? 0);
-                    calcEntry.commission_den = BigInt(decoded[1] ?? 1);
-                }
+            switch (reqInfo.reqType) {
+                case 'deleg_amt':
+                    const decodedDelegAmt = decodeFunctionResult({ abi: pool.poolType === 'LIQUID' ? erc20Abi : nonLiquidDelegatorAbi, functionName: pool.poolType === 'LIQUID' ? 'balanceOf' : 'getDelegatedAmount', data: res.result });
+                    userData.deleg_amt = BigInt(decodedDelegAmt ?? 0);
+                    break;
+                case 'rewards':
+                    const decodedRewards = decodeFunctionResult({ abi: nonLiquidDelegatorAbi, functionName: 'rewards', data: res.result });
+                    userData.rewards = BigInt(decodedRewards ?? 0);
+                    break;
+                case 'tvl':
+                     const decodedTvl = decodeFunctionResult({ abi: pool.poolType === 'LIQUID' ? erc20Abi : nonLiquidDelegatorAbi, functionName: pool.poolType === 'LIQUID' ? 'totalSupply' : 'getDelegatedTotal', data: res.result });
+                     poolStats.tvl = BigInt(decodedTvl ?? 0);
+                    break;
+                case 'pool_stake':
+                    const decodedStake = decodeFunctionResult({ abi: evmDelegatorAbi, functionName: 'getStake', data: res.result });
+                    poolStats.pool_stake = BigInt(decodedStake ?? 0);
+                    break;
+                case 'commission':
+                    const decodedCommission = decodeFunctionResult({ abi: evmDelegatorAbi, functionName: 'getCommission', data: res.result });
+                    if (Array.isArray(decodedCommission)) {
+                        poolStats.commission_num = BigInt(decodedCommission[0] ?? 0);
+                        poolStats.commission_den = BigInt(decodedCommission[1] ?? 1);
+                    }
+                    break;
             }
-        } catch (e) { continue; }
-
-        if (entry.deleg_amt > 0n || calcEntry.pool_stake > 0n) {
-             tempEvmData.set(pool.id, entry);
+        } catch (e) { 
+            console.error(`Error decoding result for pool ${pool.name} (reqType: ${reqInfo.reqType}):`, e);
+            continue; 
         }
-        tempEvmCalcData.set(pool.id, calcEntry);
+
+        if (userData.deleg_amt > 0n) {
+             tempEvmUserData.set(pool.id, userData);
+        }
+        if (poolStats.tvl || poolStats.pool_stake) {
+             tempEvmPoolStats.set(pool.id, poolStats);
+        }
     }
 
-    tempEvmData.forEach((data, poolId) => {
-        if (data.deleg_amt && data.deleg_amt > 0n) {
-             const calcData = tempEvmCalcData.get(poolId);
-             if (calcData && calcData.pool_stake && calcData.commission_den && totalNetworkStake > 0n) {
-                const { pool_stake, commission_num, commission_den } = calcData;
-                const bigintDivisionPrecision = 1000000n;
-                const rewardsPerYearInZil = 51000 * 24 * 365;
+    // --- 3.2. Сборка финального вывода для EVM ---
+    // Идем по всем пулам, чтобы включить даже те, где у пользователя нет стейка, но есть TVL
+    protoMainnetPools.forEach(pool => {
+        const userData = tempEvmUserData.get(pool.id);
+        const poolStats = tempEvmPoolStats.get(pool.id);
 
-                const votingPower = Number((pool_stake * bigintDivisionPrecision) / totalNetworkStake) / Number(bigintDivisionPrecision);
-                const commission = Number(((commission_num ?? 0n) * bigintDivisionPrecision) / commission_den) / Number(bigintDivisionPrecision);
+        // Включаем пул в вывод, если у пользователя есть стейк или в пуле есть TVL
+        if (userData?.deleg_amt > 0n || poolStats?.tvl > 0n) {
+            const outputEntry: FinalOutput = {
+                name: pool.name,
+                url: "",
+                address: pool.address,
+                tokenAddress: pool.tokenAddress,
+                deleg_amt: userData?.deleg_amt ?? 0n,
+                rewards: userData?.rewards ?? 0n,
+                tag: 'evm'
+            };
 
-                const delegatorYearReward = votingPower * rewardsPerYearInZil;
-                const delegatorRewardForShare = delegatorYearReward * (1 - commission);
-
-                const poolStakeInZil = parseFloat(formatUnits(pool_stake, 18));
-                if(poolStakeInZil > 0){
-                    data.apr = delegatorRewardForShare / poolStakeInZil;
+            if (poolStats) {
+                // Добавляем TVL
+                if (poolStats.tvl) {
+                    outputEntry.tvl = formatUnits(poolStats.tvl, pool.tokenDecimals);
                 }
-             }
-            finalOutput.push(data as FinalOutput);
+
+                // Рассчитываем и добавляем Vote Power и APR
+                if (poolStats.pool_stake && totalNetworkStake > 0n) {
+                    const { pool_stake, commission_num, commission_den } = poolStats;
+                    const bigintDivisionPrecision = 1000000n;
+
+                    // Расчет Vote Power
+                    const vp = Number((pool_stake * bigintDivisionPrecision) / totalNetworkStake) / Number(bigintDivisionPrecision);
+                    outputEntry.vote_power = parseFloat((vp * 100).toFixed(4)); // в процентах
+
+                    // Расчет APR
+                    if (commission_den && commission_den > 0n) {
+                        const rewardsPerYearInZil = 51000 * 24 * 365;
+                        const commission = Number(((commission_num ?? 0n) * bigintDivisionPrecision) / commission_den) / Number(bigintDivisionPrecision);
+
+                        const delegatorYearReward = vp * rewardsPerYearInZil;
+                        const delegatorRewardForShare = delegatorYearReward * (1 - commission);
+
+                        const poolStakeInZil = parseFloat(formatUnits(pool_stake, 18));
+                        if (poolStakeInZil > 0) {
+                            outputEntry.apr = parseFloat(((delegatorRewardForShare / poolStakeInZil) * 100).toFixed(4)); // в процентах
+                        }
+                    }
+                }
+            }
+            finalOutput.push(outputEntry);
         }
     });
 
 
-    // --- 3.2. Обработка Scilla и Avely результатов ---
+    // --- 3.3. Обработка Scilla и Avely результатов ---
     const ssnResult = resultsById.get(SCILLA_ID_SSN_LIST);
     const rewardCycleResult = resultsById.get(SCILLA_ID_REWARD_CYCLE);
     const withdrawCycleResult = resultsById.get(SCILLA_ID_WITHDRAW_CYCLE);
@@ -483,20 +569,17 @@ function calculate_rewards(delegate_per_cycle: Map<number, bigint>, need_list: n
             });
         }
     }
+    
+    // Сортируем результат для наглядности
+    finalOutput.sort((a, b) => {
+        if (a.deleg_amt > b.deleg_amt) return -1;
+        if (a.deleg_amt < b.deleg_amt) return 1;
+        return a.name.localeCompare(b.name);
+    });
 
-    // Форматируем APR в проценты для вывода
-    const finalOutputWithAPRFormatted = finalOutput.map(item => {
-        if(item.apr) {
-            return {
-                ...item,
-                // Умножаем на 100, чтобы получить проценты, и округляем
-                apr: parseFloat((item.apr * 100).toFixed(4))
-            }
-        }
-        return item;
-    })
-
-    console.log(JSON.stringify(finalOutputWithAPRFormatted, (key, value) =>
+    console.log(JSON.stringify(finalOutput, (_key, value) =>
         typeof value === 'bigint' ? value.toString() : value, 2));
 
 })().catch(console.error);
+
+
