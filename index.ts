@@ -7,11 +7,8 @@ const CONTRACT_IMPL = 'a7C67D49C82c7dc1B73D231640B2e4d0661D37c1';
 const USER_ADDRESS = '0x77e27c39ce572283b848e2cdf32cce761e34fa49';
 const USER_ADDRESS_LOWER = USER_ADDRESS.toLowerCase();
 
-// Constants for RPC calls
 const KEY_LAST_REWARD_CYCLE = 'lastrewardcycle';
 const KEY_LAST_WITHDRAW_CYCLE = 'last_withdraw_cycle_deleg';
-
-// --- Interfaces (Определения типов) ---
 
 interface RpcRequest {
   jsonrpc: string;
@@ -20,7 +17,15 @@ interface RpcRequest {
   id: number;
 }
 
-// Basic information about a Seed Node (SSN)
+interface RpcResponse {
+  jsonrpc: string;
+  method: string;
+  result: any;
+  error: any;
+  id: number;
+}
+
+
 interface SSNode {
   name: string;
   url: string;
@@ -29,25 +34,14 @@ interface SSNode {
   lastWithdrawCcleDleg: bigint;
 }
 
-// Final, clean data structure for a user's staked node
 interface StakedNode {
   node: SSNode;
   deleg_amt: bigint;
-  rewards: bigint; // This will be calculated and added
-}
-
-// A temporary, internal structure to hold all fetched data for a node before calculation
-interface StakedNodeWithData extends StakedNode {
-    direct_deposit_deleg_map: Record<string, string>;
-    buffer_deposit_deleg_map: Record<string, string>;
-    deleg_stake_per_cycle_map: Record<string, string>;
-    stake_ssn_per_cycle_map: Record<string, { arguments: [string, string] }>;
+  rewards: bigint; 
 }
 
 
-// --- RPC and Data Fetching Functions (Функции для работы с RPC) ---
-
-async function callJsonRPC(requests: RpcRequest[]): Promise<any[]> {
+async function callJsonRPC(requests: RpcRequest[]): Promise<RpcResponse[]> {
   if (requests.length === 0) {
     return [];
   }
@@ -56,7 +50,8 @@ async function callJsonRPC(requests: RpcRequest[]): Promise<any[]> {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(requests),
   });
-  return response.json();
+
+  return (await response.json()) as RpcResponse[];
 }
 
 async function getSSNList(): Promise<SSNode[]> {
@@ -213,22 +208,16 @@ function calculate_rewards(
 // --- Main Execution (Основное выполнение) ---
 
 (async function main() {
-  console.log('1. Fetching full SSN list...');
   const allSsn = await getSSNList();
 
-  console.log(`2. Finding nodes staked by user ${USER_ADDRESS}...`);
   let stakedNodes = await getStakedNodesForUser(allSsn);
 
   if (stakedNodes.length === 0) {
-    console.log('User has no staked nodes. Exiting.');
     return;
   }
   
-  console.log(`Found ${stakedNodes.length} staked node(s).`);
-  console.log('3. Fetching all reward-related data in a single batch...');
   const rewardDataResults = await fetchAllRewardData(stakedNodes);
 
-  console.log('4. Calculating rewards for each node...');
   stakedNodes.forEach((node, i) => {
     // Extract the temporary data for this specific node from the batch results
     const directRes = rewardDataResults[i * 4];
@@ -266,9 +255,6 @@ function calculate_rewards(
     }
   });
   
-  console.log('\n--- Calculation Complete ---');
-
-  // Create the final, clean output object as requested
   const finalOutput = stakedNodes.map(sn => ({
       name: sn.node.name,
       url: sn.node.url,
