@@ -1,3 +1,16 @@
+Project Path: staking
+
+Source Tree:
+
+```txt
+staking
+└── index.ts
+
+```
+
+`staking/index.ts`:
+
+```ts
 import fetch from 'node-fetch';
 
 // === Конфиг ===
@@ -271,3 +284,5 @@ function calculate_rewards(
   console.log(finalOutput);
 
 })().catch(console.error);
+
+```
