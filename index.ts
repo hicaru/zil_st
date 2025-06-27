@@ -92,6 +92,7 @@ interface FinalOutput {
     tvl?: string;      // Total Value Locked (форматированный)
     vote_power?: number; // Vote Power в процентах
     apr?: number;
+    commission?: number; // Комиссия в процентах
     tag: 'scilla' | 'avely' | 'evm';
 }
 
@@ -448,13 +449,16 @@ function assembleEvmFinalOutput(
                 const vpRatio = Number((pool_stake * bigintDivisionPrecision) / totalNetworkStake) / Number(bigintDivisionPrecision);
                 outputEntry.vote_power = parseFloat((vpRatio * 100).toFixed(4));
 
-                // Расчет APR
+                // Расчет APR и Комиссии
                 if (commission_den && commission_den > 0n) {
                     const rewardsPerYearInZil = 51000 * 24 * 365;
-                    const commission = Number(((commission_num ?? 0n) * bigintDivisionPrecision) / commission_den) / Number(bigintDivisionPrecision);
+                    const commissionRatio = Number(((commission_num ?? 0n) * bigintDivisionPrecision) / commission_den) / Number(bigintDivisionPrecision);
+                    
+                    // Сохраняем комиссию в процентах
+                    outputEntry.commission = parseFloat((commissionRatio * 100).toFixed(4));
                     
                     const delegatorYearReward = vpRatio * rewardsPerYearInZil;
-                    const delegatorRewardForShare = delegatorYearReward * (1 - commission);
+                    const delegatorRewardForShare = delegatorYearReward * (1 - commissionRatio);
 
                     const poolStakeInZil = parseFloat(formatUnits(pool_stake, 18));
                     if (poolStakeInZil > 0) {
@@ -639,5 +643,4 @@ async function main() {
 }
 
 main().catch(console.error);
-
 
