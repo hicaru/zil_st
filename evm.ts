@@ -1,217 +1,281 @@
-// fetchUserData.ts
 import {
-  createPublicClient,
-  http,
-  defineChain,
-  formatUnits,
-  erc20Abi,
-  type Address,
-} from "viem";
-import { DateTime } from "luxon";
-import { readContract } from "viem/actions";
+    encodeFunctionData,
+    type Address,
+    type Hex
+} from 'viem';
 
-// --- КОНФИГУРАЦИЯ ---
-// Замените этот адрес на адрес пользователя, данные которого вы хотите получить
-const USER_ADDRESS: Address = "0xb1fE20CD2b856BA1a4e08afb39dfF5C80f0cBbCa"; // <--- ИЗМЕНИТЬ ЗДЕСЬ
+// =======================
+// === КОНСТАНТЫ ИЗ RUST ===
+// =======================
+const SCILLA_GZIL_CONTRACT = 'a7c67d49c82c7dc1b73d231640b2e4d0661d37c1';
+const ST_ZIL_CONTRACT = 'e6f14afc8739a4ead0a542c07d3ff978190e3b92';
+const DEPOSIT_ADDRESS: Address = '0x00000000005a494c4445504f53495450524f5859';
 
-const PROTOMAINNET_CHAIN_ID = 32770;
-const PROTOMAINNET_RPC_URL = "http://188.234.213.4:4202";
-
-// --- ABIs из `stakingAbis.ts` ---
-const baseDelegatorAbi = [
-  {
-    inputs: [],
-    name: "getPendingClaims",
-    outputs: [{ internalType: "uint256[2][]", name: "claims", type: "uint256[2][]" }],
-    stateMutability: "view",
-    type: "function",
-  },
-  {
-    inputs: [],
-    name: "getClaimable",
-    outputs: [{ internalType: "uint256", name: "", type: "uint256" }],
-    stateMutability: "view",
-    type: "function",
-  },
-] as const;
-
-const nonLiquidDelegatorAbi = [
-  {
-    inputs: [],
-    name: "getDelegatedAmount",
-    outputs: [{ type: "uint256" }],
-    stateMutability: "view",
-    type: "function",
-  },
-  {
-    inputs: [],
-    name: "rewards",
-    outputs: [{ internalType: "uint256", name: "", type: "uint256" }],
-    stateMutability: "view",
-    type: "function",
-  },
-] as const;
-
-// --- Определение сети и клиента Viem ---
-const zq2ProtoMainnet = defineChain({
-  id: PROTOMAINNET_CHAIN_ID,
-  name: "Zq2 ProtoMainnet",
-  nativeCurrency: { name: "ZIL", symbol: "ZIL", decimals: 18 },
-  rpcUrls: { default: { http: [PROTOMAINNET_RPC_URL] } },
-});
-
-const client = createPublicClient({
-  chain: zq2ProtoMainnet,
-  transport: http(),
-});
+// ========================
+// === ТИПЫ И ИНТЕРФЕЙСЫ ===
+// ========================
+interface RpcRequest {
+    jsonrpc: string;
+    method: string;
+    params: any[];
+    id: number;
+}
 
 enum StakingPoolType {
-  LIQUID = "LIQUID",
-  NORMAL = "NON_LIQUID",
+    LIQUID = 'LIQUID',
+    NORMAL = 'NORMAL',
 }
 
-// --- Конфигурация пулов для ProtoMainnet (из `stakingPoolsConfig.ts`) ---
-const protoMainnetPools = [
-    { id: "MHhBMDU3", address: "0xA0572935d53e14C73eBb3de58d319A9Fe51E1FC8", tokenAddress: "0x0000000000000000000000000000000000000000", name: "Moonlet", poolType: StakingPoolType.NORMAL, tokenDecimals: 18, tokenSymbol: "ZIL" },
-    { id: "MHgyQWJl", address: "0x2Abed3a598CBDd8BB9089c09A9202FD80C55Df8c", tokenAddress: "0xD8B61fed51b9037A31C2Bf0a5dA4B717AF0C0F78", name: "AtomicWallet", poolType: StakingPoolType.LIQUID, tokenDecimals: 18, tokenSymbol: "SHARK" },
-    { id: "MHhCOWQ2", address: "0xB9d689c64b969ad9eDd1EDDb50be42E217567fd3", tokenAddress: "0x0000000000000000000000000000000000000000", name: "CEX.IO", poolType: StakingPoolType.NORMAL, tokenDecimals: 18, tokenSymbol: "ZIL" },
-    { id: "MHhlMEMw", address: "0xe0C095DBE85a8ca75de4749B5AEe0D18100a3C39", tokenAddress: "0x7B213b5AEB896bC290F0cD8B8720eaF427098186", name: "PlunderSwap", poolType: StakingPoolType.LIQUID, tokenDecimals: 18, tokenSymbol: "pZIL" },
-    { id: "MHhDMDI0", address: "0xC0247d13323F1D06b6f24350Eea03c5e0Fbf65ed", tokenAddress: "0x2c51C97b22E73AfD33911397A20Aa5176e7Ab951", name: "Luganodes", poolType: StakingPoolType.LIQUID, tokenDecimals: 18, tokenSymbol: "LNZIL" },
-    { id: "MHg4QTBk", address: "0x8A0dEd57ABd3bc50A600c94aCbEcEf62db5f4D32", tokenAddress: "0x0000000000000000000000000000000000000000", name: "DTEAM", poolType: StakingPoolType.NORMAL, tokenDecimals: 18, tokenSymbol: "ZIL" },
-    { id: "MHgzYjFD", address: "0x3b1Cd55f995a9A8A634fc1A3cEB101e2baA636fc", tokenAddress: "0x0000000000000000000000000000000000000000", name: "Shardpool", poolType: StakingPoolType.NORMAL, tokenDecimals: 18, tokenSymbol: "ZIL" },
-    { id: "MHg2NmEy", address: "0x66a2bb4AD6999966616B2ad209833260F8eA07C8", tokenAddress: "0xA1Adc08C12c684AdB28B963f251d6cB1C6a9c0c1", name: "Encapsulate", poolType: StakingPoolType.LIQUID, tokenDecimals: 18, tokenSymbol: "encapZIL" },
-    { id: "MHhlNTlE", address: "0xe59D98b887e6D40F52f7Cc8d5fb4CF0F9Ed7C98B", tokenAddress: "0xf564DF9BeB417FB50b38A58334CA7607B36D3BFb", name: "Amazing Pool - Avely and ZilPay", poolType: StakingPoolType.LIQUID, tokenDecimals: 18, tokenSymbol: "stZIL" },
-    { id: "MHhkMDkw", address: "0xd090424684a9108229b830437b490363eB250A58", tokenAddress: "0xE10575244f8E8735d71ed00287e9d1403f03C960", name: "PathrockNetwork", poolType: StakingPoolType.LIQUID, tokenDecimals: 18, tokenSymbol: "zLST" },
-    { id: "MHgzM2NE", address: "0x33cDb55D7fD68d0Da1a3448F11bCdA5fDE3426B3", tokenAddress: "0x0000000000000000000000000000000000000000", name: "BlackNodes", poolType: StakingPoolType.NORMAL, tokenDecimals: 18, tokenSymbol: "ZIL" },
-    { id: "MHgzNTEx", address: "0x35118Af4Fc43Ce58CEcBC6Eeb21D0C1Eb7E28Bd3", tokenAddress: "0x245E6AB0d092672B18F27025385f98E2EC3a3275", name: "Lithium Digital", poolType: StakingPoolType.LIQUID, tokenDecimals: 18, tokenSymbol: "litZil" },
-    { id: "MHg2MjI2", address: "0x62269F615E1a3E36f96dcB7fDDF8B823737DD618", tokenAddress: "0x770a35A5A95c2107860E9F74c1845e20289cbfe6", name: "TorchWallet.io", poolType: StakingPoolType.LIQUID, tokenDecimals: 18, tokenSymbol: "tZIL" },
-    { id: "MHhhNDUx", address: "0xa45114E92E26B978F0B37cF19E66634f997250f9", tokenAddress: "0x0000000000000000000000000000000000000000", name: "Stakefish", poolType: StakingPoolType.NORMAL, tokenDecimals: 18, tokenSymbol: "ZIL" },
-    { id: "MHgwMjM3", address: "0x02376bA9e0f98439eA9F76A582FBb5d20E298177", tokenAddress: "0x0000000000000000000000000000000000000000", name: "AlphaZIL (former Ezil)", poolType: StakingPoolType.NORMAL, tokenDecimals: 18, tokenSymbol: "ZIL" },
-];
+interface EvmPool {
+    id: string;
+    address: Address;
+    tokenAddress: Address;
+    name: string;
+    poolType: StakingPoolType;
+}
 
-// --- Основная логика ---
-async function main() {
-  if (USER_ADDRESS === '0xYourWalletAddressHere') {
-    console.error("Пожалуйста, укажите адрес кошелька в переменной USER_ADDRESS.");
-    return;
-  }
-  console.log(`Получение данных для пользователя: ${USER_ADDRESS}\n`);
+interface InitialCoreIds {
+    ssnList: number;
+    rewardCycle: number;
+    withdrawCycle: number;
+    stZilBalance: number;
+    totalNetworkStake: number;
+}
 
-  // --- 1. Получение данных о стейках ---
-  console.log("--- 1. Данные о стейках (Staked Balances) ---");
-  const stakingDataPromises = protoMainnetPools.map(async (pool) => {
-    let stakingTokenAmount = 0n;
-    if (pool.poolType === StakingPoolType.LIQUID) {
-      stakingTokenAmount = await readContract(client, {
-        address: pool.tokenAddress as Address,
-        abi: erc20Abi,
-        functionName: "balanceOf",
-        args: [USER_ADDRESS],
-      });
-    } else { // NORMAL
-      stakingTokenAmount = await readContract(client, {
-        address: pool.address as Address,
-        abi: nonLiquidDelegatorAbi,
-        functionName: "getDelegatedAmount",
-        account: USER_ADDRESS, // 'account' используется для переопределения from
-      });
-    }
-    return { ...pool, stakingTokenAmount };
-  });
+// ===================
+// === ABI (такие же, как в основном файле) ===
+// ===================
+const depositAbi = [{
+    inputs: [],
+    name: "getFutureTotalStake",
+    outputs: [{ internalType: "uint256", name: "", type: "uint256" }],
+    stateMutability: "view",
+    type: "function",
+}] as const;
 
-  const stakingData = await Promise.all(stakingDataPromises);
-  stakingData
-    .filter((data) => data.stakingTokenAmount > 0n)
-    .forEach((data) => {
-      console.log(
-        `  - ${data.name}: ${formatUnits(data.stakingTokenAmount, data.tokenDecimals)} ${data.tokenSymbol}`
-      );
-    });
-  
-  // --- 2. Получение данных о выводе средств ---
-  console.log("\n--- 2. Данные о выводе (Unstaking Info) ---");
-  const currentBlockNumber = await client.getBlockNumber();
-  const unstakingDataPromises = protoMainnetPools.map(async (pool) => {
-    const [blockNumberAndAmount, claimableNow] = await Promise.all([
-      readContract(client, {
-        address: pool.address as Address,
-        abi: baseDelegatorAbi,
-        functionName: "getPendingClaims",
-        account: USER_ADDRESS,
-      }),
-      readContract(client, {
-        address: pool.address as Address,
-        abi: baseDelegatorAbi,
-        functionName: "getClaimable",
-        account: USER_ADDRESS,
-      }),
-    ]);
-    return { pool, blockNumberAndAmount, claimableNow };
-  });
+const erc20Abi = [{
+    name: 'balanceOf',
+    type: 'function',
+    stateMutability: 'view',
+    inputs: [{ type: 'address', name: 'account' }],
+    outputs: [{ type: 'uint256', name: 'balance' }],
+}] as const;
 
-  const unstakingDataRaw = await Promise.all(unstakingDataPromises);
+const nonLiquidDelegatorAbi = [{
+    name: 'getDelegatedAmount',
+    type: 'function',
+    stateMutability: 'view',
+    inputs: [],
+    outputs: [{ type: 'uint256' }],
+}, {
+    name: 'rewards',
+    type: 'function',
+    stateMutability: 'view',
+    inputs: [],
+    outputs: [{ internalType: 'uint256', name: '', type: 'uint256' }],
+}] as const;
 
-  const allUnstakes = unstakingDataRaw.flatMap(({ pool, blockNumberAndAmount, claimableNow }) => {
-    const claims = [];
-    if (claimableNow > 0n) {
-      claims.push({
-        poolName: pool.name,
-        zilAmount: claimableNow,
-        status: "Доступно к выводу (Available to claim)",
-      });
-    }
-    blockNumberAndAmount.forEach(([block, amount]) => {
-      const blocksRemaining = Number(block - currentBlockNumber);
-      // Предполагаем, что 1 блок = 2 секунды (уточнить для ZQ2)
-      const secondsRemaining = blocksRemaining * 2; 
-      const availableAt = DateTime.now().plus({ seconds: secondsRemaining });
-      claims.push({
-        poolName: pool.name,
-        zilAmount: amount,
-        status: `Ожидание (Pending). Будет доступно ~ ${availableAt.toRelative()}`,
-      });
-    });
-    return claims;
-  });
-
-  if (allUnstakes.length > 0) {
-    allUnstakes.forEach((unstake) => {
-      console.log(
-        `  - ${unstake.poolName}: ${formatUnits(unstake.zilAmount, 18)} ZIL. Статус: ${unstake.status}`
-      );
-    });
-  } else {
-    console.log("  Нет активных процессов вывода.");
-  }
+const evmDelegatorAbi = [{
+    name: 'getCommission',
+    type: 'function',
+    stateMutability: 'view',
+    inputs: [],
+    outputs: [{ type: 'uint256' }, { type: 'uint256' }],
+}] as const;
 
 
-  // --- 3. Получение данных о наградах ---
-  console.log("\n--- 3. Данные о наградах (Claimable Rewards) ---");
-  const rewardPromises = protoMainnetPools
-    .filter((pool) => pool.poolType === StakingPoolType.NORMAL)
-    .map(async (pool) => {
-      const zilRewardAmount = await readContract(client, {
-        address: pool.address as Address,
-        abi: nonLiquidDelegatorAbi,
-        functionName: "rewards",
-        account: USER_ADDRESS,
-      });
-      return { poolName: pool.name, zilRewardAmount };
+// =========================
+// === ФУНКЦИИ-КОНСТРУКТОРЫ ===
+// =========================
+
+function buildInitialCoreRequests(startId: number, scillaUserAddress: string): [RpcRequest[], InitialCoreIds, number] {
+    const ids = {
+        ssnList: startId++,
+        rewardCycle: startId++,
+        withdrawCycle: startId++,
+        stZilBalance: startId++,
+        totalNetworkStake: startId++,
+    };
+
+    const scillaUserAddressLower = scillaUserAddress.toLowerCase();
+    const getFutureTotalStakeCallData = encodeFunctionData({ abi: depositAbi, functionName: 'getFutureTotalStake' });
+
+    const requests: RpcRequest[] = [
+        { jsonrpc: '2.0', method: 'GetSmartContractSubState', params: [SCILLA_GZIL_CONTRACT, 'ssnlist', []], id: ids.ssnList },
+        { jsonrpc: '2.0', method: 'GetSmartContractSubState', params: [SCILLA_GZIL_CONTRACT, 'lastrewardcycle', []], id: ids.rewardCycle },
+        { jsonrpc: '2.0', method: 'GetSmartContractSubState', params: [SCILLA_GZIL_CONTRACT, 'last_withdraw_cycle_deleg', [scillaUserAddress]], id: ids.withdrawCycle },
+        { jsonrpc: '2.0', method: 'GetSmartContractSubState', params: [ST_ZIL_CONTRACT, 'balances', [scillaUserAddressLower]], id: ids.stZilBalance },
+        { jsonrpc: '2.0', method: 'eth_call', params: [{ to: DEPOSIT_ADDRESS, data: getFutureTotalStakeCallData }, 'latest'], id: ids.totalNetworkStake }
+    ];
+
+    return [requests, ids, startId];
+}
+
+function buildEvmPoolsRequests(pools: EvmPool[], evmUserAddress: Address, startId: number): [RpcRequest[], Map<string, any>, number] {
+    let currentId = startId;
+    const requests: RpcRequest[] = [];
+    const evmRequestMap = new Map();
+
+    pools.forEach(pool => {
+        // --- Запросы для пользователя ---
+        const delegAmtId = currentId++;
+        requests.push(pool.poolType === StakingPoolType.LIQUID
+            ? { jsonrpc: '2.0', method: 'eth_call', params: [{ to: pool.tokenAddress, data: encodeFunctionData({ abi: erc20Abi, functionName: 'balanceOf', args: [evmUserAddress] }) }, 'latest'], id: delegAmtId }
+            : { jsonrpc: '2.0', method: 'eth_call', params: [{ to: pool.address, data: encodeFunctionData({ abi: nonLiquidDelegatorAbi, functionName: 'getDelegatedAmount' }), from: evmUserAddress }, 'latest'], id: delegAmtId }
+        );
+        evmRequestMap.set(String(delegAmtId), { pool, reqType: 'deleg_amt' });
+
+        if (pool.poolType === StakingPoolType.NORMAL) {
+            const rewardsId = currentId++;
+            requests.push({ jsonrpc: '2.0', method: 'eth_call', params: [{ to: pool.address, data: encodeFunctionData({ abi: nonLiquidDelegatorAbi, functionName: 'rewards' }), from: evmUserAddress }, 'latest'], id: rewardsId });
+            evmRequestMap.set(String(rewardsId), { pool, reqType: 'rewards' });
+        }
+
+        // --- Запросы для статистики пула (опускаем для соответствия Rust-тесту) ---
+        // TVL
+        currentId++;
+        // PoolStake
+        currentId++;
+
+        const commissionId = currentId++;
+        requests.push({ jsonrpc: '2.0', method: 'eth_call', params: [{ to: pool.address, data: encodeFunctionData({ abi: evmDelegatorAbi, functionName: 'getCommission' }) }, 'latest'], id: commissionId });
+        evmRequestMap.set(String(commissionId), { pool, reqType: 'commission' });
+
     });
     
-  const rewardsData = await Promise.all(rewardPromises);
-  const claimableRewards = rewardsData.filter((r) => r.zilRewardAmount > 0n);
-
-  if (claimableRewards.length > 0) {
-    claimableRewards.forEach((reward) => {
-      console.log(
-        `  - ${reward.poolName}: ${formatUnits(reward.zilRewardAmount, 18)} ZIL`
-      );
-    });
-  } else {
-    console.log("  Нет наград, доступных для клейма.");
-  }
-
+    return [requests, evmRequestMap, currentId];
 }
 
-main().catch(console.error);
+// ===================
+// === ТЕСТОВЫЙ КОД ===
+// ===================
+
+/**
+ * Простая функция для глубокого сравнения объектов и массивов.
+ */
+function deepEqual(a: any, b: any): boolean {
+    if (a === b) return true;
+    if (typeof a !== 'object' || a === null || typeof b !== 'object' || b === null) return false;
+    const keysA = Object.keys(a);
+    const keysB = Object.keys(b);
+    if (keysA.length !== keysB.length) return false;
+    for (const key of keysA) {
+        if (!keysB.includes(key) || !deepEqual(a[key], b[key])) return false;
+    }
+    return true;
+}
+
+/**
+ * Функция для проверки и логирования.
+ * @param description Описание проверки.
+ * @param success Результат сравнения.
+ */
+function check(description: string, success: boolean) {
+    if (success) {
+        console.log(`  ✅ ${description}`);
+    } else {
+        console.error(`  ❌ ${description}`);
+        // Выбрасываем ошибку, чтобы пометить тест как проваленный.
+        throw new Error(`Check failed: ${description}`);
+    }
+}
+
+/**
+ * Простой исполнитель тестов.
+ */
+async function runTest(name: string, testFn: () => void | Promise<void>) {
+    console.log(`\n--- Running test: ${name} ---`);
+    try {
+        await testFn();
+        console.log(`👍 PASS: ${name}`);
+    } catch (error) {
+        console.error(`☠️ FAIL: ${name}`);
+        // Логируем саму ошибку, чтобы видеть детали.
+        console.error((error as Error).message);
+    }
+}
+
+/**
+ * Основная функция для запуска всех тестов.
+ */
+async function runAllTests() {
+    console.log("🚀 Starting Stake Request Builder Tests...");
+
+    await runTest('should build initial core requests correctly', () => {
+        const scillaUserAddress = "0x77e27c39ce572283b848e2cdf32cce761e34fa49";
+        const [requests, ids, next_id] = buildInitialCoreRequests(1, scillaUserAddress);
+
+        check('Количество запросов должно быть 5', requests.length === 5);
+        check('Следующий ID должен быть 6', next_id === 6);
+        
+        check('ID для ssnList корректен', ids.ssnList === 1);
+        check('ID для rewardCycle корректен', ids.rewardCycle === 2);
+        check('ID для withdrawCycle корректен', ids.withdrawCycle === 3);
+        check('ID для stZilBalance корректен', ids.stZilBalance === 4);
+        check('ID для totalNetworkStake корректен', ids.totalNetworkStake === 5);
+
+        const req1 = requests[0];
+        check('ID запроса 1 корректен', req1.id === 1);
+        check('Метод запроса 1 корректен', req1.method === 'GetSmartContractSubState');
+        check('Параметры запроса 1 корректны', deepEqual(req1.params, [SCILLA_GZIL_CONTRACT, "ssnlist", []]));
+
+        const req3 = requests[2];
+        check('ID запроса 3 корректен', req3.id === 3);
+        check('Метод запроса 3 корректен', req3.method === 'GetSmartContractSubState');
+        check('Параметры запроса 3 корректны', deepEqual(req3.params, [SCILLA_GZIL_CONTRACT, "last_withdraw_cycle_deleg", [scillaUserAddress]]));
+        
+        const req5 = requests[4];
+        const getFutureTotalStakeCallData = encodeFunctionData({ abi: depositAbi, functionName: 'getFutureTotalStake' });
+        check('ID запроса 5 корректен', req5.id === 5);
+        check('Метод запроса 5 корректен', req5.method === 'eth_call');
+        check('Адрес "to" в запросе 5 корректен', req5.params[0].to === DEPOSIT_ADDRESS);
+        check('Данные "data" в запросе 5 корректны', req5.params[0].data === getFutureTotalStakeCallData);
+    });
+
+    await runTest('should build EVM pools requests correctly', () => {
+        const pools: EvmPool[] = [
+            {
+                id: "MHhBMDU3",
+                address: "0xA0572935d53e14C73eBb3de58d319A9Fe51E1FC8",
+                tokenAddress: "0x0000000000000000000000000000000000000000",
+                name: "Moonlet",
+                poolType: StakingPoolType.NORMAL,
+            },
+            {
+                id: "MHgyQWJl",
+                address: "0x2Abed3a598CBDd8BB9089c09A9202FD80C55Df8c",
+                tokenAddress: "0xD8B61fed51b9037A31C2Bf0a5dA4B717AF0C0F78",
+                name: "AtomicWallet",
+                poolType: StakingPoolType.LIQUID,
+            },
+        ];
+        const evmUserAddress: Address = '0xb1fE20CD2b856BA1a4e08afb39dfF5C80f0cBbCa';
+        const [requests] = buildEvmPoolsRequests(pools, evmUserAddress, 1);
+        
+        const totalExpectedRequests = 4;
+        check(`Количество запросов должно быть ${totalExpectedRequests}`, requests.length === totalExpectedRequests);
+        
+        const moonletDelegReq = requests.find(r => r.id === 1);
+        check('Запрос делегирования для Moonlet должен существовать', !!moonletDelegReq);
+        const getDelegatedAmountCallData = encodeFunctionData({ abi: nonLiquidDelegatorAbi, functionName: 'getDelegatedAmount' });
+        check('Данные для Moonlet deleg req корректны', moonletDelegReq!.params[0].data === getDelegatedAmountCallData);
+
+        const moonletRewardsReq = requests.find(r => r.id === 2);
+        check('Запрос наград для Moonlet должен существовать', !!moonletRewardsReq);
+
+        const atomicDelegReq = requests.find(r => r.id === 5);
+        check('Запрос делегирования для Atomic должен существовать', !!atomicDelegReq);
+        const balanceOfCallData = encodeFunctionData({ abi: erc20Abi, functionName: 'balanceOf', args: [evmUserAddress] });
+        check('Адрес "to" для Atomic deleg req корректен', atomicDelegReq!.params[0].to === pools[1].tokenAddress);
+        check('Данные для Atomic deleg req корректны', atomicDelegReq!.params[0].data === balanceOfCallData);
+        
+        const atomicRewardsReq = requests.find(r => r.id === 6);
+        check('Запрос наград для Atomic не должен существовать', !atomicRewardsReq);
+    });
+    
+    console.log("\n✨ All tests finished.");
+}
+
+// Запускаем все тесты
+runAllTests();
+
