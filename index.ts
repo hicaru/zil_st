@@ -68,7 +68,7 @@ async function getInitialData(): Promise<{ ssnList: SSNode[]; stZilBalance: bigi
   ];
 
   const [ssnResult, rewardCycleResult, withdrawCycleResult, stZilResult] = await callJsonRPC(batchRequests);
-  
+
   // Обработка данных SSN
   const ssnlist = ssnResult.result['ssnlist'];
   const lastrewardcycle = BigInt(rewardCycleResult.result[KEY_LAST_REWARD_CYCLE]);
@@ -249,22 +249,26 @@ function calculate_rewards(
   }
   
   // 5. Формируем итоговый чистый список
+  // ИЗМЕНЕНИЕ: Добавляем поле `tags` со значением ['scilla'] для обычных нод
   const finalOutput = stakedNodes.map(sn => ({
       name: sn.node.name,
       url: sn.node.url,
       address: sn.node.address,
       deleg_amt: sn.deleg_amt,
       rewards: sn.rewards,
+      tag: 'scilla',
   }));
 
   // 6. Добавляем stZIL, если баланс > 0
   if (stZilBalance > 0n) {
+    // ИЗМЕНЕНИЕ: Добавляем поле `tags` со значением ['avely'] для stZIL
     finalOutput.push({
         name: "stZIL (Avely Finance)",
         url: "https://avely.fi/",
         address: ST_ZIL_IMPL, // Используем адрес контракта stZIL
         deleg_amt: stZilBalance,
         rewards: 0n, // Награды stZIL начисляются через рост курса, а не прямыми выплатами
+        tag: 'avely',
     });
   }
 
