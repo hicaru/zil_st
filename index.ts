@@ -1,8 +1,4 @@
-#!/usr/bin/env bun
-
 import { Zilliqa } from '@zilliqa-js/zilliqa';
-import { toBech32Address, fromBech32Address } from '@zilliqa-js/crypto';
-import { validation } from '@zilliqa-js/util';
 
 // Конфигурация для Mainnet
 const MAINNET_CONFIG = {
@@ -14,7 +10,7 @@ const MAINNET_CONFIG = {
 // Интерфейсы
 interface NodeStakeInfo {
     ssnName: string;
-    ssnAddress: string;
+    ssnAddress: string; // Адрес теперь в формате hex (0x...)
     stakeAmount: bigint;
     rewardsAmount: bigint;
     commissionRate: bigint;
@@ -75,16 +71,14 @@ class ZilliqaStakeChecker {
     }
 
     /**
-     * Конвертирует адрес в правильный формат
+     * Конвертирует адрес в правильный формат (lowercase hex)
      */
     private normalizeAddress(address: string): string {
-        if (validation.isBech32(address)) {
-            return fromBech32Address(address).toLowerCase();
+        // Простая проверка на формат hex-адреса (0x + 40 hex-символов)
+        if (!/^0x[0-9a-f]{40}$/i.test(address)) {
+            throw new Error(`Неверный формат адреса: ${address}. Ожидается hex-адрес формата 0x...`);
         }
-        if (validation.isAddress(address)) {
-            return address.toLowerCase();
-        }
-        throw new Error(`Неверный формат адреса: ${address}`);
+        return address.toLowerCase();
     }
 
     /**
@@ -238,7 +232,7 @@ class ZilliqaStakeChecker {
                 const ssnInfo = ssnList[ssnAddress];
                 
                 if (!ssnInfo) {
-                    console.log(`⚠️  Узел ${ssnAddress} не найден в списке`);
+                    console.log(`⚠️  Узел 0x${ssnAddress} не найден в списке`);
                     continue;
                 }
 
@@ -256,7 +250,7 @@ class ZilliqaStakeChecker {
 
                 const nodeInfo: NodeStakeInfo = {
                     ssnName,
-                    ssnAddress: toBech32Address(ssnAddress),
+                    ssnAddress: `0x${ssnAddress}`, // Отображаем как hex
                     stakeAmount,
                     rewardsAmount,
                     commissionRate,
@@ -267,20 +261,20 @@ class ZilliqaStakeChecker {
 
                 // Выводим информацию в целочисленном виде
                 console.log(`\n🎯 Узел: ${ssnName}`);
-                console.log(`    📍 Адрес: ${toBech32Address(ssnAddress)}`);
-                console.log(`    💰 Стейк (Qa): ${stakeAmount.toString()}`);
-                console.log(`    🎁 Награды (Qa): ${rewardsAmount.toString()}`);
-                console.log(`    💹 Комиссия (10^7): ${commissionRate.toString()}`);
-                console.log(`    📊 Статус: ${status}`);
+                console.log(`   📍 Адрес: 0x${ssnAddress}`);
+                console.log(`   💰 Стейк (Qa): ${stakeAmount.toString()}`);
+                console.log(`   🎁 Награды (Qa): ${rewardsAmount.toString()}`);
+                console.log(`   💹 Комиссия (10^7): ${commissionRate.toString()}`);
+                console.log(`   📊 Статус: ${status}`);
             }
 
             // Выводим общую статистику
             console.log('\n' + '=' + '='.repeat(80));
             console.log(`📈 ОБЩАЯ СТАТИСТИКА:`);
-            console.log(`    🎯 Всего узлов со стейком: ${stakedNodes.length}`);
-            console.log(`    💰 Общая сумма стейка (Qa): ${totalStaked.toString()}`);
-            console.log(`    🎁 Общая сумма невостребованных наград (Qa): ${totalRewards.toString()}`);
-            console.log(`    🌐 Сеть: Mainnet`);
+            console.log(`   🎯 Всего узлов со стейком: ${stakedNodes.length}`);
+            console.log(`   💰 Общая сумма стейка (Qa): ${totalStaked.toString()}`);
+            console.log(`   🎁 Общая сумма невостребованных наград (Qa): ${totalRewards.toString()}`);
+            console.log(`   🌐 Сеть: Mainnet`);
             console.log('=' + '='.repeat(80));
 
             return stakedNodes;
@@ -295,22 +289,16 @@ class ZilliqaStakeChecker {
 
 // Основная функция
 async function main() {
-    console.log('🔥 Zilliqa Staking Checker v2.0 (BigInt Edition)\n');
+    console.log('🔥 Zilliqa Staking Checker v2.1 (Base16 Edition)\n');
     
-    // Получаем адрес из аргументов командной строки
-    const walletAddress = "zil1ruzwjhykmxlugf5a2wlm78z9cjv0u3rt0e84w2";
+    // Получаем адрес из аргументов командной строки.
+    // Адрес zil1ruzwjhykmxlugf5a2wlm78z9cjv0u3rt0e84w2 в hex-формате
+    const walletAddress = "0x1f04E95C96D9BFC4269D53bfBf1c45C498FE446B";
     
     if (!walletAddress) {
         console.error('❌ Ошибка: Укажите адрес кошелька');
         console.log('📝 Использование: bun run src/index.ts <wallet_address>');
-        console.log('📝 Пример: bun run src/index.ts zil1234567890abcdef...');
-        process.exit(1);
-    }
-
-    // Проверяем формат адреса
-    if (!validation.isBech32(walletAddress) && !validation.isAddress(walletAddress)) {
-        console.error('❌ Ошибка: Неверный формат адреса');
-        console.log('💡 Адрес должен быть в формате bech32 (zil...) или checksum (0x...)');
+        console.log('📝 Пример: bun run src/index.ts 0x2b5c2ea7e1458e72c85116a4f358b5e43c5b98a2');
         process.exit(1);
     }
 
