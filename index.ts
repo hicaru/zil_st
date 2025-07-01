@@ -1,644 +1,251 @@
-import fetch from 'node-fetch';
-import {
-    encodeFunctionData,
-    decodeFunctionResult,
-    type Address,
-    formatUnits,
-    type Hex
-} from 'viem';
+#!/usr/bin/env bun
 
-// =======================
-// === ОСНОВНОЙ КОНФИГ ===
-// =======================
-const RPC_URL = 'http://188.234.213.4:4202';
+import { Zilliqa } from '@zilliqa-js/zilliqa';
+import { toBech32Address, fromBech32Address } from '@zilliqa-js/crypto';
+import { validation, units, BN } from '@zilliqa-js/util';
+import { BigNumber } from 'bignumber.js';
 
-// --- Адреса пользователей ---
-const SCILLA_USER_ADDRESS = '0x77e27c39ce572283b848e2cdf32cce761e34fa49';
-const EVM_USER_ADDRESS: Address = '0xb1fE20CD2b856BA1a4e08afb39dfF5C80f0cBbCa';
+// Конфигурация для Mainnet
+const MAINNET_CONFIG = {
+    api: 'https://api.zilliqa.com',
+    impl: '0xa7C67D49C82c7dc1B73D231640B2e4d0661D37c1', // Mainnet staking contract
+    chainId: 1
+};
 
-const SCILLA_USER_ADDRESS_LOWER = SCILLA_USER_ADDRESS.toLowerCase();
-
-// --- Адреса контрактов ---
-const SCILLA_GZIL_CONTRACT = 'a7C67D49C82c7dc1B73D231640B2e4d0661D37c1';
-const ST_ZIL_CONTRACT = 'e6f14afc8739a4ead0a542c07d3ff978190e3b92';
-const DEPOSIT_ADDRESS: Address = '0x00000000005a494c4445504f53495450524f5859';
-
-// ========================
-// === ИНТЕРФЕЙСЫ И ТИПЫ ===
-// ========================
-
-// RPC
-interface RpcRequest {
-    jsonrpc: string;
-    method: string;
-    params: any[];
-    id: number;
+// Интерфейсы
+interface NodeStakeInfo {
+    ssnName: string;
+    ssnAddress: string;
+    stakeAmount: string;
+    stakeAmountZil: string;
+    commissionRate: string;
+    status: string;
 }
 
-interface RpcResponse {
-    jsonrpc: string;
+interface BatchQueryResult {
+    id: number;
     result: any;
-    id: number;
-    error?: { code: number; message: string };
 }
 
-// Scilla
-interface SSNode {
-    name: string;
-    url: string;
-    address: string;
-    lastrewardcycle: bigint;
-    lastWithdrawCcleDleg: bigint;
-}
+class ZilliqaStakeChecker {
+    private zilliqa: Zilliqa;
+    private implAddress: string;
 
-interface ScillaStakedNode {
-    node: SSNode;
-    deleg_amt: bigint;
-    rewards: bigint;
-}
-
-// EVM
-enum StakingPoolType {
-    LIQUID = 'LIQUID',
-    NORMAL = 'NON_LIQUID',
-}
-
-interface EvmPool {
-    address: Address;
-    tokenAddress: Address;
-    name: string;
-    poolType: StakingPoolType;
-    tokenDecimals: number;
-    tokenSymbol: string;
-}
-
-// Структура для хранения статистики пула
-interface EvmPoolStats {
-    tvl?: bigint;
-    pool_stake?: bigint;
-    commission_num?: bigint;
-    commission_den?: bigint;
-}
-
-// Финальный результат
-interface FinalOutput {
-    name: string;
-    url: string;
-    address: string;
-    tokenAddress?: string;
-    deleg_amt: bigint;
-    rewards: bigint;
-    tvl?: string;      // Total Value Locked (форматированный)
-    vote_power?: number; // Vote Power в процентах
-    apr?: number;
-    commission?: number; // Комиссия в процентах
-    tag: 'scilla' | 'avely' | 'evm';
-}
-
-// Тип для карты EVM запросов
-type EvmRequestMap = Map<string, { pool: EvmPool, reqType: 'deleg_amt' | 'rewards' | 'pool_stake' | 'commission' | 'tvl' }>;
-type ResultsByIdMap = Map<number, RpcResponse>;
-
-
-// =====================
-// === EVM КОНФИГ (ABIs) ===
-// =====================
-
-const erc20Abi = [
-    {
-        name: 'balanceOf',
-        type: 'function',
-        stateMutability: 'view',
-        inputs: [{ type: 'address', name: 'account' }],
-        outputs: [{ type: 'uint256', name: 'balance' }],
-    },
-    {
-        name: 'totalSupply',
-        type: 'function',
-        stateMutability: 'view',
-        inputs: [],
-        outputs: [{ type: 'uint256' }],
+    constructor() {
+        this.zilliqa = new Zilliqa(MAINNET_CONFIG.api);
+        this.implAddress = MAINNET_CONFIG.impl;
     }
-] as const;
 
-const nonLiquidDelegatorAbi = [
-    {
-        name: 'getDelegatedAmount',
-        type: 'function',
-        stateMutability: 'view',
-        inputs: [],
-        outputs: [{ type: 'uint256' }],
-    },
-    {
-        name: 'rewards',
-        type: 'function',
-        stateMutability: 'view',
-        inputs: [],
-        outputs: [{ internalType: 'uint256', name: '', type: 'uint256' }],
-    },
-    {
-        name: 'getDelegatedTotal', // Для TVL неликвидных пулов
-        type: 'function',
-        stateMutability: 'view',
-        inputs: [],
-        outputs: [{ type: 'uint256' }],
-    }
-] as const;
-
-const depositAbi = [
-    {
-        inputs: [],
-        name: "getFutureTotalStake",
-        outputs: [{ internalType: "uint256", name: "", type: "uint256" }],
-        stateMutability: "view",
-        type: "function",
-    },
-] as const;
-
-const evmDelegatorAbi = [
-    {
-        name: 'getStake',
-        type: 'function',
-        stateMutability: 'view',
-        inputs: [],
-        outputs: [{ type: 'uint256' }],
-    },
-    {
-        name: 'getCommission',
-        type: 'function',
-        stateMutability: 'view',
-        inputs: [],
-        outputs: [{ type: 'uint256' }, { type: 'uint256' }],
-    },
-] as const;
-
-
-// Список EVM пулов
-const protoMainnetPools: EvmPool[] = [
-    { address: "0xA0572935d53e14C73eBb3de58d319A9Fe51E1FC8", tokenAddress: "0x0000000000000000000000000000000000000000", name: "Moonlet", poolType: StakingPoolType.NORMAL, tokenDecimals: 18, tokenSymbol: "ZIL" },
-    { address: "0x2Abed3a598CBDd8BB9089c09A9202FD80C55Df8c", tokenAddress: "0xD8B61fed51b9037A31C2Bf0a5dA4B717AF0C0F78", name: "AtomicWallet", poolType: StakingPoolType.LIQUID, tokenDecimals: 18, tokenSymbol: "SHARK" },
-    { address: "0xB9d689c64b969ad9eDd1EDDb50be42E217567fd3", tokenAddress: "0x0000000000000000000000000000000000000000", name: "CEX.IO", poolType: StakingPoolType.NORMAL, tokenDecimals: 18, tokenSymbol: "ZIL" },
-    { address: "0xe0C095DBE85a8ca75de4749B5AEe0D18100a3C39", tokenAddress: "0x7B213b5AEB896bC290F0cD8B8720eaF427098186", name: "PlunderSwap", poolType: StakingPoolType.LIQUID, tokenDecimals: 18, tokenSymbol: "pZIL" },
-    { address: "0xC0247d13323F1D06b6f24350Eea03c5e0Fbf65ed", tokenAddress: "0x2c51C97b22E73AfD33911397A20Aa5176e7Ab951", name: "Luganodes", poolType: StakingPoolType.LIQUID, tokenDecimals: 18, tokenSymbol: "LNZIL" },
-    { address: "0x8A0dEd57ABd3bc50A600c94aCbEcEf62db5f4D32", tokenAddress: "0x0000000000000000000000000000000000000000", name: "DTEAM", poolType: StakingPoolType.NORMAL, tokenDecimals: 18, tokenSymbol: "ZIL" },
-    { address: "0x3b1Cd55f995a9A8A634fc1A3cEB101e2baA636fc", tokenAddress: "0x0000000000000000000000000000000000000000", name: "Shardpool", poolType: StakingPoolType.NORMAL, tokenDecimals: 18, tokenSymbol: "ZIL" },
-    { address: "0x66a2bb4AD6999966616B2ad209833260F8eA07C8", tokenAddress: "0xA1Adc08C12c684AdB28B963f251d6cB1C6a9c0c1", name: "Encapsulate", poolType: StakingPoolType.LIQUID, tokenDecimals: 18, tokenSymbol: "encapZIL" },
-    { address: "0xe59D98b887e6D40F52f7Cc8d5fb4CF0F9Ed7C98B", tokenAddress: "0xf564DF9BeB417FB50b38A58334CA7607B36D3BFb", name: "Amazing Pool - Avely and ZilPay", poolType: StakingPoolType.LIQUID, tokenDecimals: 18, tokenSymbol: "stZIL" },
-    { address: "0xd090424684a9108229b830437b490363eB250A58", tokenAddress: "0xE10575244f8E8735d71ed00287e9d1403f03C960", name: "PathrockNetwork", poolType: StakingPoolType.LIQUID, tokenDecimals: 18, tokenSymbol: "zLST" },
-    { address: "0x33cDb55D7fD68d0Da1a3448F11bCdA5fDE3426B3", tokenAddress: "0x0000000000000000000000000000000000000000", name: "BlackNodes", poolType: StakingPoolType.NORMAL, tokenDecimals: 18, tokenSymbol: "ZIL" },
-    { address: "0x35118Af4Fc43Ce58CEcBC6Eeb21D0C1Eb7E28Bd3", tokenAddress: "0x245E6AB0d092672B18F27025385f98E2EC3a3275", name: "Lithium Digital", poolType: StakingPoolType.LIQUID, tokenDecimals: 18, tokenSymbol: "litZil" },
-    { address: "0x62269F615E1a3E36f96dcB7fDDF8B823737DD618", tokenAddress: "0x770a35A5A95c2107860E9F74c1845e20289cbfe6", name: "TorchWallet.io", poolType: StakingPoolType.LIQUID, tokenDecimals: 18, tokenSymbol: "tZIL" },
-    { address: "0xa45114E92E26B978F0B37cF19E66634f997250f9", tokenAddress: "0x0000000000000000000000000000000000000000", name: "Stakefish", poolType: StakingPoolType.NORMAL, tokenDecimals: 18, tokenSymbol: "ZIL" },
-    { address: "0x02376bA9e0f98439eA9F76A582FBb5d20E298177", tokenAddress: "0x0000000000000000000000000000000000000000", name: "AlphaZIL (former Ezil)", poolType: StakingPoolType.NORMAL, tokenDecimals: 18, tokenSymbol: "ZIL" },
-];
-
-
-// ===============================
-// === ФУНКЦИИ ДЛЯ РАБОТЫ С RPC ===
-// ===============================
-
-/**
- * Выполняет пакетный JSON-RPC запрос.
- * @param requests Массив объектов запросов.
- * @returns Промис, который разрешается в массив ответов.
- */
-async function callJsonRPC(requests: RpcRequest[]): Promise<RpcResponse[]> {
-    if (requests.length === 0) {
-        return [];
-    }
-    const response = await fetch(RPC_URL, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(requests),
-    });
-    const data = await response.json();
-    return Array.isArray(data) ? data : [data as RpcResponse];
-}
-
-
-// ===================================
-// === ЛОГИКА ДЛЯ SCILLA И AVELY ===
-// ===================================
-const KEY_LAST_REWARD_CYCLE = 'lastrewardcycle';
-const KEY_LAST_WITHDRAW_CYCLE = 'last_withdraw_cycle_deleg';
-
-function get_reward_need_cycle_list(last_withdraw_cycle: bigint, last_reward_cycle: bigint): number[] {
-    const cycles: number[] = [];
-    if (last_reward_cycle <= last_withdraw_cycle) return [];
-    for (let i = Number(last_withdraw_cycle) + 1; i <= Number(last_reward_cycle); i++) {
-        cycles.push(i);
-    }
-    return cycles;
-}
-
-function combine_buff_direct(reward_list: number[], direct_deposit_map: Record<string, string>, buffer_deposit_map: Record<string, string>, deleg_stake_per_cycle_map: Record<string, string>): Map<number, bigint> {
-    const result_map = new Map<number, bigint>();
-    for (const cycle of reward_list) {
-        const c1 = cycle - 1;
-        const c2 = cycle - 2;
-        const hist_amt = BigInt(deleg_stake_per_cycle_map[c1.toString()] ?? '0');
-        const dir_amt = BigInt(direct_deposit_map[c1.toString()] ?? '0');
-        const buf_amt = BigInt(buffer_deposit_map[c2.toString()] ?? '0');
-        const total_amt_tmp = dir_amt + buf_amt + hist_amt;
-        const previous_cycle_amt = result_map.get(c1) ?? 0n;
-        const total_amt = total_amt_tmp + previous_cycle_amt;
-        result_map.set(cycle, total_amt);
-    }
-    return result_map;
-}
-function calculate_rewards(delegate_per_cycle: Map<number, bigint>, need_list: number[], stake_ssn_per_cycle_map: Record<string, { arguments: [string, string] }>): bigint {
-    let result_rewards = 0n;
-    if (!stake_ssn_per_cycle_map) return result_rewards;
-    for (const cycle of need_list) {
-        const cycle_info = stake_ssn_per_cycle_map[cycle.toString()];
-        if (cycle_info) {
-            const total_stake = BigInt(cycle_info.arguments[0]);
-            const total_rewards = BigInt(cycle_info.arguments[1]);
-            const deleg_amt = delegate_per_cycle.get(cycle);
-            if (deleg_amt && total_stake > 0n) {
-                result_rewards += (deleg_amt * total_rewards) / total_stake;
+    /**
+     * Выполняет batch запрос к контракту
+     */
+    private async batchQuery(queries: Array<[string, string, any[]]>): Promise<BatchQueryResult[]> {
+        const startTime = performance.now();
+        
+        try {
+            console.log(`🔍 Выполняется batch запрос (${queries.length} запросов)...`);
+            
+            const response = await this.zilliqa.blockchain.getSmartContractSubStateBatch(queries);
+            
+            if (!response.batch_result) {
+                throw new Error('Неверный формат ответа от batch запроса');
             }
+
+            const endTime = performance.now();
+            console.log(`✅ Batch запрос выполнен за ${((endTime - startTime) / 1000).toFixed(2)}с`);
+            
+            // Сортируем результаты по ID для корректного порядка
+            return response.batch_result.sort((a: any, b: any) => a.id - b.id);
+            
+        } catch (error) {
+            console.error('❌ Ошибка в batch запросе:', error);
+            throw error;
         }
     }
-    return result_rewards;
-}
 
-// ==================================================
-// === ФУНКЦИИ-КОНСТРУКТОРЫ ПАКЕТНЫХ ЗАПРОСОВ (BUILDERS) ===
-// ==================================================
-
-/**
- * Создает начальный пакет запросов для Scilla, Avely и общего стейка сети.
- * @param startId Начальный идентификатор для запросов.
- * @returns Объект с пакетом запросов, картой ID и следующим доступным ID.
- */
-function buildInitialCoreRequests(startId: number) {
-    const ids = {
-        ssnList: startId++,
-        rewardCycle: startId++,
-        withdrawCycle: startId++,
-        stZilBalance: startId++,
-        totalNetworkStake: startId++,
-    };
-
-    const requests: RpcRequest[] = [
-        { jsonrpc: '2.0', method: 'GetSmartContractSubState', params: [SCILLA_GZIL_CONTRACT, 'ssnlist', []], id: ids.ssnList },
-        { jsonrpc: '2.0', method: 'GetSmartContractSubState', params: [SCILLA_GZIL_CONTRACT, KEY_LAST_REWARD_CYCLE, []], id: ids.rewardCycle },
-        { jsonrpc: '2.0', method: 'GetSmartContractSubState', params: [SCILLA_GZIL_CONTRACT, KEY_LAST_WITHDRAW_CYCLE, [SCILLA_USER_ADDRESS]], id: ids.withdrawCycle },
-        { jsonrpc: '2.0', method: 'GetSmartContractSubState', params: [ST_ZIL_CONTRACT, 'balances', [SCILLA_USER_ADDRESS_LOWER]], id: ids.stZilBalance },
-        { jsonrpc: '2.0', method: 'eth_call', params: [{ to: DEPOSIT_ADDRESS, data: encodeFunctionData({ abi: depositAbi, functionName: 'getFutureTotalStake' }) }, 'latest'], id: ids.totalNetworkStake }
-    ];
-
-    return { requests, ids, nextId: startId };
-}
-
-/**
- * Создает пакет запросов для всех EVM пулов (данные пользователя и статистика пула).
- * @param pools Массив EVM пулов.
- * @param startId Начальный идентификатор для запросов.
- * @returns Объект с пакетом запросов, картой запросов и следующим доступным ID.
- */
-function buildEvmPoolsRequests(pools: EvmPool[], startId: number) {
-    let currentId = startId;
-    const requests: RpcRequest[] = [];
-    const evmRequestMap: EvmRequestMap = new Map();
-
-    pools.forEach(pool => {
-        // --- Запросы для пользователя ---
-        const delegAmtId = currentId++;
-        requests.push(pool.poolType === StakingPoolType.LIQUID
-            ? { jsonrpc: '2.0', method: 'eth_call', params: [{ to: pool.tokenAddress, data: encodeFunctionData({ abi: erc20Abi, functionName: 'balanceOf', args: [EVM_USER_ADDRESS] }) }, 'latest'], id: delegAmtId }
-            : { jsonrpc: '2.0', method: 'eth_call', params: [{ to: pool.address, data: encodeFunctionData({ abi: nonLiquidDelegatorAbi, functionName: 'getDelegatedAmount' }), from: EVM_USER_ADDRESS }, 'latest'], id: delegAmtId }
-        );
-        evmRequestMap.set(String(delegAmtId), { pool, reqType: 'deleg_amt' });
-
-        if (pool.poolType === StakingPoolType.NORMAL) {
-            const rewardsId = currentId++;
-            requests.push({ jsonrpc: '2.0', method: 'eth_call', params: [{ to: pool.address, data: encodeFunctionData({ abi: nonLiquidDelegatorAbi, functionName: 'rewards' }), from: EVM_USER_ADDRESS }, 'latest'], id: rewardsId });
-            evmRequestMap.set(String(rewardsId), { pool, reqType: 'rewards' });
+    /**
+     * Конвертирует адрес в правильный формат
+     */
+    private normalizeAddress(address: string): string {
+        if (validation.isBech32(address)) {
+            return fromBech32Address(address).toLowerCase();
         }
+        if (validation.isAddress(address)) {
+            return address.toLowerCase();
+        }
+        throw new Error(`Неверный формат адреса: ${address}`);
+    }
 
-        // --- Запросы для статистики пула ---
-        const tvlId = currentId++;
-        requests.push(pool.poolType === StakingPoolType.LIQUID
-            ? { jsonrpc: '2.0', method: 'eth_call', params: [{ to: pool.tokenAddress, data: encodeFunctionData({ abi: erc20Abi, functionName: 'totalSupply' }) }, 'latest'], id: tvlId }
-            : { jsonrpc: '2.0', method: 'eth_call', params: [{ to: pool.address, data: encodeFunctionData({ abi: nonLiquidDelegatorAbi, functionName: 'getDelegatedTotal' }) }, 'latest'], id: tvlId }
-        );
-        evmRequestMap.set(String(tvlId), { pool, reqType: 'tvl' });
+    /**
+     * Конвертирует Qa в ZIL с форматированием
+     */
+    private formatZilAmount(qaAmount: string): string {
+        const zil = units.fromQa(new BN(qaAmount), units.Units.Zil);
+        const zilBN = new BigNumber(zil);
+        const formatted = zilBN.toFixed(3);
+        const parts = formatted.split('.');
+        const formattedInteger = parts[0].replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+        return `${formattedInteger}.${parts[1]}`;
+    }
 
-        const poolStakeId = currentId++;
-        requests.push({ jsonrpc: '2.0', method: 'eth_call', params: [{ to: pool.address, data: encodeFunctionData({ abi: evmDelegatorAbi, functionName: 'getStake' }) }, 'latest'], id: poolStakeId });
-        evmRequestMap.set(String(poolStakeId), { pool, reqType: 'pool_stake' });
+    /**
+     * Конвертирует комиссию из формата контракта в проценты
+     */
+    private formatCommissionRate(rate: string): string {
+        if (!rate) return '0.00';
+        const commRate = new BigNumber(rate).dividedBy(10**7);
+        return commRate.toFixed(2);
+    }
 
-        const commissionId = currentId++;
-        requests.push({ jsonrpc: '2.0', method: 'eth_call', params: [{ to: pool.address, data: encodeFunctionData({ abi: evmDelegatorAbi, functionName: 'getCommission' }) }, 'latest'], id: commissionId });
-        evmRequestMap.set(String(commissionId), { pool, reqType: 'commission' });
-    });
+    /**
+     * Получает все узлы с активным стейком для указанного адреса
+     */
+    async getStakedNodes(walletAddress: string): Promise<NodeStakeInfo[]> {
+        console.log(`\n🚀 Поиск стейков для адреса: ${walletAddress}`);
+        
+        // Нормализуем адрес
+        const normalizedAddress = this.normalizeAddress(walletAddress);
+        console.log(`📍 Нормализованный адрес: ${normalizedAddress}`);
 
-    return { requests, evmRequestMap, nextId: currentId };
-}
-
-
-// ===============================================
-// === ФУНКЦИИ-ОБРАБОТЧИКИ РЕЗУЛЬТАТОВ (PROCESSORS) ===
-// ===============================================
-
-/**
- * Обрабатывает результаты запросов к EVM пулам, декодирует данные.
- * @param resultsById Карта ответов RPC по их ID.
- * @param evmRequestMap Карта, связывающая ID запросов с информацией о пулах.
- * @returns Промежуточные данные о стейках пользователя и статистике пулов.
- */
-function processEvmPoolsResults(resultsById: ResultsByIdMap, evmRequestMap: EvmRequestMap) {
-    const tempEvmUserData = new Map<string, { deleg_amt: bigint, rewards: bigint }>();
-    const tempEvmPoolStats = new Map<string, EvmPoolStats>();
-
-    for (const [id, res] of resultsById.entries()) {
-        const reqInfo = evmRequestMap.get(String(id));
-        if (!reqInfo) continue;
-
-        const { pool, reqType } = reqInfo;
-        if (res.error || !res.result || res.result === "0x") continue;
-
-        const userData = tempEvmUserData.get(pool.address) ?? { deleg_amt: 0n, rewards: 0n };
-        const poolStats = tempEvmPoolStats.get(pool.address) ?? {};
+        // Подготавливаем batch запросы
+        const queries: Array<[string, string, any[]]> = [
+            [this.implAddress, 'deposit_amt_deleg', [normalizedAddress]], // Депозиты пользователя
+            [this.implAddress, 'ssnlist', []], // Список всех узлов
+        ];
 
         try {
-            switch (reqType) {
-                case 'deleg_amt':
-                    const decodedDelegAmt = decodeFunctionResult({ abi: pool.poolType === 'LIQUID' ? erc20Abi : nonLiquidDelegatorAbi, functionName: pool.poolType === 'LIQUID' ? 'balanceOf' : 'getDelegatedAmount', data: res.result as Hex });
-                    userData.deleg_amt = BigInt(decodedDelegAmt as any ?? 0);
-                    break;
-                case 'rewards':
-                    const decodedRewards = decodeFunctionResult({ abi: nonLiquidDelegatorAbi, functionName: 'rewards', data: res.result as Hex });
-                    userData.rewards = BigInt(decodedRewards as any ?? 0);
-                    break;
-                case 'tvl':
-                     const decodedTvl = decodeFunctionResult({ abi: pool.poolType === 'LIQUID' ? erc20Abi : nonLiquidDelegatorAbi, functionName: pool.poolType === 'LIQUID' ? 'totalSupply' : 'getDelegatedTotal', data: res.result as Hex });
-                    poolStats.tvl = BigInt(decodedTvl as any ?? 0);
-                    break;
-                case 'pool_stake':
-                    const decodedStake = decodeFunctionResult({ abi: evmDelegatorAbi, functionName: 'getStake', data: res.result as Hex });
-                    poolStats.pool_stake = BigInt(decodedStake as any ?? 0);
-                    break;
-                case 'commission':
-                    const decodedCommission = decodeFunctionResult({ abi: evmDelegatorAbi, functionName: 'getCommission', data: res.result as Hex });
-                    if (Array.isArray(decodedCommission)) {
-                        poolStats.commission_num = BigInt(decodedCommission[0] ?? 0);
-                        poolStats.commission_den = BigInt(decodedCommission[1] ?? 1);
-                    }
-                    break;
-            }
-        } catch (e) {
-            console.error(`Error decoding result for pool ${pool.name} (reqType: ${reqType}):`, e);
-            continue;
-        }
+            // Выполняем batch запрос
+            const results = await this.batchQuery(queries);
+            
+            // Обрабатываем результаты
+            const depositsResult = results[0]?.result;
+            const ssnListResult = results[1]?.result;
 
-        tempEvmUserData.set(pool.address, userData);
-        tempEvmPoolStats.set(pool.address, poolStats);
-    }
-    return { tempEvmUserData, tempEvmPoolStats };
-}
-
-
-/**
- * Собирает финальный массив стейков в EVM пулах, вычисляет APR и Vote Power.
- * @param pools Список всех EVM пулов.
- * @param userData Данные о стейках пользователя.
- * @param poolStats Статистика пулов (TVL, комиссия и т.д.).
- * @param totalNetworkStake Общий стейк в сети.
- * @returns Массив объектов FinalOutput для EVM пулов.
- */
-function assembleEvmFinalOutput(
-    pools: EvmPool[],
-    userData: Map<string, { deleg_amt: bigint, rewards: bigint }>,
-    poolStats: Map<string, EvmPoolStats>,
-    totalNetworkStake: bigint
-): FinalOutput[] {
-    const finalOutput: FinalOutput[] = [];
-
-    pools.forEach(pool => {
-        const userEntry = userData.get(pool.address);
-        const statsEntry = poolStats.get(pool.address);
-
-        if (!(userEntry?.deleg_amt > 0n) && !(statsEntry?.tvl > 0n)) {
-            return; // Пропускаем пулы без стейка пользователя и без TVL
-        }
-
-        const outputEntry: FinalOutput = {
-            name: pool.name,
-            url: "",
-            address: pool.address,
-            tokenAddress: pool.tokenAddress,
-            deleg_amt: userEntry?.deleg_amt ?? 0n,
-            rewards: userEntry?.rewards ?? 0n,
-            tag: 'evm'
-        };
-
-        if (statsEntry) {
-            if (statsEntry.tvl) {
-                outputEntry.tvl = formatUnits(statsEntry.tvl, pool.tokenDecimals);
+            if (!depositsResult || !ssnListResult) {
+                throw new Error('Не удалось получить данные из контракта');
             }
 
-            const { pool_stake, commission_num, commission_den } = statsEntry;
-            if (pool_stake && totalNetworkStake > 0n) {
-                const bigintDivisionPrecision = 1000000n;
+            // Получаем депозиты пользователя
+            const userDeposits = depositsResult.deposit_amt_deleg?.[normalizedAddress];
+            
+            if (!userDeposits || Object.keys(userDeposits).length === 0) {
+                console.log('❌ У данного адреса нет активных стейков');
+                return [];
+            }
 
-                // Расчет Vote Power
-                const vpRatio = Number((pool_stake * bigintDivisionPrecision) / totalNetworkStake) / Number(bigintDivisionPrecision);
-                outputEntry.vote_power = parseFloat((vpRatio * 100).toFixed(4));
+            // Получаем информацию о всех узлах
+            const ssnList = ssnListResult.ssnlist;
+            
+            if (!ssnList) {
+                throw new Error('Не удалось получить список узлов');
+            }
 
-                // Расчет APR и Комиссии
-                if (commission_den && commission_den > 0n) {
-                    const rewardsPerYearInZil = 51000 * 24 * 365;
-                    const commissionRatio = Number(((commission_num ?? 0n) * bigintDivisionPrecision) / commission_den) / Number(bigintDivisionPrecision);
-                    
-                    // Сохраняем комиссию в процентах
-                    outputEntry.commission = parseFloat((commissionRatio * 100).toFixed(4));
-                    
-                    const delegatorYearReward = vpRatio * rewardsPerYearInZil;
-                    const delegatorRewardForShare = delegatorYearReward * (1 - commissionRatio);
+            console.log(`\n📊 Найдено стейков на ${Object.keys(userDeposits).length} узлах:`);
+            console.log('=' + '='.repeat(80));
 
-                    const poolStakeInZil = parseFloat(formatUnits(pool_stake, 18));
-                    if (poolStakeInZil > 0) {
-                        outputEntry.apr = parseFloat(((delegatorRewardForShare / poolStakeInZil) * 100).toFixed(4));
-                    }
+            // Обрабатываем каждый стейк
+            const stakedNodes: NodeStakeInfo[] = [];
+            let totalStaked = new BigNumber(0);
+
+            for (const [ssnAddress, stakeAmount] of Object.entries(userDeposits)) {
+                const ssnInfo = ssnList[ssnAddress];
+                
+                if (!ssnInfo) {
+                    console.log(`⚠️  Узел ${ssnAddress} не найден в списке`);
+                    continue;
                 }
+
+                const ssnArgs = ssnInfo.arguments;
+                const ssnName = ssnArgs[3] || 'Неизвестно';
+                const commissionRate = this.formatCommissionRate(ssnArgs[7]);
+                const isActive = ssnArgs[0]?.constructor === 'True';
+                const status = isActive ? 'Активен' : 'Неактивен';
+                
+                const stakeAmountStr = stakeAmount as string;
+                const stakeAmountZil = this.formatZilAmount(stakeAmountStr);
+                
+                totalStaked = totalStaked.plus(new BigNumber(stakeAmountStr));
+
+                const nodeInfo: NodeStakeInfo = {
+                    ssnName,
+                    ssnAddress: toBech32Address(ssnAddress),
+                    stakeAmount: stakeAmountStr,
+                    stakeAmountZil,
+                    commissionRate,
+                    status
+                };
+
+                stakedNodes.push(nodeInfo);
+
+                // Выводим информацию
+                console.log(`\n🎯 Узел: ${ssnName}`);
+                console.log(`   📍 Адрес: ${toBech32Address(ssnAddress)}`);
+                console.log(`   💰 Стейк: ${stakeAmountZil} ZIL`);
+                console.log(`   💹 Комиссия: ${commissionRate}%`);
+                console.log(`   📊 Статус: ${status}`);
             }
-        }
-        finalOutput.push(outputEntry);
-    });
 
-    return finalOutput;
-}
+            // Выводим общую статистику
+            const totalStakedZil = this.formatZilAmount(totalStaked.toString());
+            console.log('\n' + '=' + '='.repeat(80));
+            console.log(`📈 ОБЩАЯ СТАТИСТИКА:`);
+            console.log(`   🎯 Всего узлов со стейком: ${stakedNodes.length}`);
+            console.log(`   💰 Общая сумма стейка: ${totalStakedZil} ZIL`);
+            console.log(`   🌐 Сеть: Mainnet`);
+            console.log('=' + '='.repeat(80));
 
+            return stakedNodes;
 
-/**
- * Обрабатывает стейк пользователя в Avely (stZIL).
- * @param stZilResult Результат RPC запроса на баланс stZIL.
- * @returns Объект FinalOutput для Avely или null, если баланс нулевой.
- */
-function processAvelyStake(stZilResult: RpcResponse | undefined): FinalOutput | null {
-    const stZilBalanceAmount = stZilResult?.result?.balances?.[SCILLA_USER_ADDRESS_LOWER];
-    const stZilBalance = stZilBalanceAmount ? BigInt(stZilBalanceAmount) : 0n;
-
-    if (stZilBalance > 0n) {
-        return {
-            name: "stZIL (Avely Finance)",
-            url: "https://avely.fi/",
-            address: ST_ZIL_CONTRACT,
-            deleg_amt: stZilBalance,
-            rewards: 0n,
-            tag: 'avely',
-        };
-    }
-    return null;
-}
-
-/**
- * Обрабатывает все стейки пользователя в Scilla SSN, включая расчет наград.
- * @param ssnResult Результат RPC с полным списком нод.
- * @param rewardCycleResult Результат RPC с последним наградным циклом.
- * @param withdrawCycleResult Результат RPC с последним циклом вывода для пользователя.
- * @returns Промис, который разрешается в массив FinalOutput для Scilla нод.
- */
-async function processScillaStakes(
-    ssnResult: RpcResponse | undefined,
-    rewardCycleResult: RpcResponse | undefined,
-    withdrawCycleResult: RpcResponse | undefined
-): Promise<FinalOutput[]> {
-    if (!ssnResult?.result?.ssnlist || !rewardCycleResult?.result || !withdrawCycleResult?.result) {
-        return [];
-    }
-
-    const ssnlist = ssnResult.result['ssnlist'];
-    const lastrewardcycle = BigInt(rewardCycleResult.result[KEY_LAST_REWARD_CYCLE]);
-    const lastWithdrawNodes = withdrawCycleResult.result[KEY_LAST_WITHDRAW_CYCLE]?.[SCILLA_USER_ADDRESS] ?? {};
-
-    const allSsnNodes: SSNode[] = Object.keys(ssnlist).map((key) => ({
-        name: ssnlist[key].arguments[3],
-        url: ssnlist[key].arguments[5],
-        address: key,
-        lastrewardcycle,
-        lastWithdrawCcleDleg: lastWithdrawNodes[key] ? BigInt(lastWithdrawNodes[key]) : 0n,
-    }));
-    
-    // --- Шаг 1: Найти все ноды, в которых у пользователя есть стейк ---
-    const delegAmtRequests = allSsnNodes.map((node, index) => ({
-        jsonrpc: '2.0' as const, method: 'GetSmartContractSubState',
-        params: [SCILLA_GZIL_CONTRACT, 'ssn_deleg_amt', [node.address, SCILLA_USER_ADDRESS]],
-        id: index
-    }));
-    const delegAmtResults = await callJsonRPC(delegAmtRequests);
-
-    let stakedScillaNodes: ScillaStakedNode[] = [];
-    for (const res of delegAmtResults) {
-        const node = allSsnNodes[res.id];
-        const delegations = res.result?.['ssn_deleg_amt']?.[node.address]?.[SCILLA_USER_ADDRESS];
-        if (delegations) {
-            const amountQA = BigInt(delegations);
-            if (amountQA > 0n) {
-                stakedScillaNodes.push({ node, deleg_amt: amountQA, rewards: 0n });
-            }
+        } catch (error) {
+            console.error('❌ Ошибка при получении стейков:', error);
+            throw error;
         }
     }
-
-    if (stakedScillaNodes.length === 0) return [];
-    
-    // --- Шаг 2: Для застейканных нод, запросить данные для расчета наград ---
-    const rewardDataRequests = stakedScillaNodes.flatMap((stakedNode, index) => [
-        { jsonrpc: '2.0' as const, method: 'GetSmartContractSubState', params: [SCILLA_GZIL_CONTRACT, 'direct_deposit_deleg', [SCILLA_USER_ADDRESS_LOWER, stakedNode.node.address]], id: index * 4 + 1 },
-        { jsonrpc: '2.0' as const, method: 'GetSmartContractSubState', params: [SCILLA_GZIL_CONTRACT, 'buff_deposit_deleg', [SCILLA_USER_ADDRESS_LOWER, stakedNode.node.address]], id: index * 4 + 2 },
-        { jsonrpc: '2.0' as const, method: 'GetSmartContractSubState', params: [SCILLA_GZIL_CONTRACT, 'deleg_stake_per_cycle', [SCILLA_USER_ADDRESS_LOWER, stakedNode.node.address]], id: index * 4 + 3 },
-        { jsonrpc: '2.0' as const, method: 'GetSmartContractSubState', params: [SCILLA_GZIL_CONTRACT, 'stake_ssn_per_cycle', [stakedNode.node.address]], id: index * 4 + 4 },
-    ]);
-    const rewardDataResults = await callJsonRPC(rewardDataRequests);
-    const rewardResultsById: ResultsByIdMap = new Map(rewardDataResults.map(r => [r.id, r]));
-
-    // --- Шаг 3: Рассчитать награды ---
-    stakedScillaNodes.forEach((stakedNode, i) => {
-        const directRes = rewardResultsById.get(i * 4 + 1);
-        const buffRes = rewardResultsById.get(i * 4 + 2);
-        const delegCycleRes = rewardResultsById.get(i * 4 + 3);
-        const stakeSsnCycleRes = rewardResultsById.get(i * 4 + 4);
-
-        const direct_map = directRes?.result?.direct_deposit_deleg?.[SCILLA_USER_ADDRESS_LOWER]?.[stakedNode.node.address] || {};
-        const buffer_map = buffRes?.result?.buff_deposit_deleg?.[SCILLA_USER_ADDRESS_LOWER]?.[stakedNode.node.address] || {};
-        const deleg_cycle_map = delegCycleRes?.result?.deleg_stake_per_cycle?.[SCILLA_USER_ADDRESS_LOWER]?.[stakedNode.node.address] || {};
-        const stake_ssn_map = stakeSsnCycleRes?.result?.stake_ssn_per_cycle?.[stakedNode.node.address] || {};
-
-        const reward_need_list = get_reward_need_cycle_list(stakedNode.node.lastWithdrawCcleDleg, stakedNode.node.lastrewardcycle);
-        if (reward_need_list.length > 0) {
-            const delegate_per_cycle = combine_buff_direct(reward_need_list, direct_map, buffer_map, deleg_cycle_map);
-            stakedNode.rewards = calculate_rewards(delegate_per_cycle, reward_need_list, stake_ssn_map);
-        }
-    });
-    
-    return stakedScillaNodes.map(sn => ({
-        name: sn.node.name,
-        url: sn.node.url,
-        address: sn.node.address,
-        deleg_amt: sn.deleg_amt,
-        rewards: sn.rewards,
-        tag: 'scilla',
-    }));
 }
 
-
-// =======================
-// === ОСНОВНОЕ ВЫПОЛНЕНИЕ ===
-// =======================
-
-/**
- * Главная функция-оркестратор.
- */
+// Основная функция
 async function main() {
-    // --- 1. Формирование основного пакета запросов ---
-    const coreReqs = buildInitialCoreRequests(1);
-    const evmReqs = buildEvmPoolsRequests(protoMainnetPools, coreReqs.nextId);
+    console.log('🔥 Zilliqa Staking Checker v1.0\n');
     
-    const allRequests = [...coreReqs.requests, ...evmReqs.requests];
-
-    // --- 2. Выполнение всех запросов одним пакетом ---
-    console.log(`Отправка ${allRequests.length} запросов...`);
-    const allResults = await callJsonRPC(allRequests);
-    const resultsById: ResultsByIdMap = new Map(allResults.map(res => [res.id, res]));
-    console.log("Все запросы выполнены.");
-
-    // --- 3. Обработка результатов ---
-    const finalOutput: FinalOutput[] = [];
-
-    // 3.1 Обработка EVM
-    const totalNetworkStakeResponse = resultsById.get(coreReqs.ids.totalNetworkStake);
-    const totalNetworkStake = totalNetworkStakeResponse?.result ? BigInt(totalNetworkStakeResponse.result) : 0n;
+    // Получаем адрес из аргументов командной строки
+    const walletAddress = "zil1ruzwjhykmxlugf5a2wlm78z9cjv0u3rt0e84w2";
     
-    const { tempEvmUserData, tempEvmPoolStats } = processEvmPoolsResults(resultsById, evmReqs.evmRequestMap);
-    const evmStakes = assembleEvmFinalOutput(protoMainnetPools, tempEvmUserData, tempEvmPoolStats, totalNetworkStake);
-    finalOutput.push(...evmStakes);
-
-    // 3.2 Обработка Avely
-    const avelyStake = processAvelyStake(resultsById.get(coreReqs.ids.stZilBalance));
-    if (avelyStake) {
-        finalOutput.push(avelyStake);
+    if (!walletAddress) {
+        console.error('❌ Ошибка: Укажите адрес кошелька');
+        console.log('📝 Использование: bun run src/index.ts <wallet_address>');
+        console.log('📝 Пример: bun run src/index.ts zil1234567890abcdef...');
+        process.exit(1);
     }
-    
-    // 3.3 Обработка Scilla (с дополнительными запросами внутри)
-    const scillaStakes = await processScillaStakes(
-        resultsById.get(coreReqs.ids.ssnList),
-        resultsById.get(coreReqs.ids.rewardCycle),
-        resultsById.get(coreReqs.ids.withdrawCycle)
-    );
-    finalOutput.push(...scillaStakes);
-    
-    // --- 4. Сортировка и вывод результата ---
-    finalOutput.sort((a, b) => {
-        if (a.deleg_amt > b.deleg_amt) return -1;
-        if (a.deleg_amt < b.deleg_amt) return 1;
-        return a.name.localeCompare(b.name);
-    });
 
-    console.log(JSON.stringify(finalOutput, (_key, value) =>
-        typeof value === 'bigint' ? value.toString() : value, 2));
+    // Проверяем формат адреса
+    if (!validation.isBech32(walletAddress) && !validation.isAddress(walletAddress)) {
+        console.error('❌ Ошибка: Неверный формат адреса');
+        console.log('💡 Адрес должен быть в формате bech32 (zil...) или checksum (0x...)');
+        process.exit(1);
+    }
+
+    try {
+        const checker = new ZilliqaStakeChecker();
+        const stakedNodes = await checker.getStakedNodes(walletAddress);
+        
+        if (stakedNodes.length === 0) {
+            console.log('\n🤷 На данном адресе нет активных стейков');
+        } else {
+            console.log(`\n✅ Успешно получена информация о ${stakedNodes.length} узлах с активным стейком!`);
+        }
+        
+    } catch (error) {
+        console.error('\n💥 Критическая ошибка:', error);
+        process.exit(1);
+    }
 }
 
+// Обработка необработанных ошибок
+process.on('unhandledRejection', (error) => {
+    console.error('💥 Необработанная ошибка:', error);
+    process.exit(1);
+});
+
+// Запускаем программу
 main().catch(console.error);
+
