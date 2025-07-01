@@ -2,8 +2,7 @@
 
 import { Zilliqa } from '@zilliqa-js/zilliqa';
 import { toBech32Address, fromBech32Address } from '@zilliqa-js/crypto';
-import { validation, units, BN } from '@zilliqa-js/util';
-import { BigNumber } from 'bignumber.js';
+import { validation } from '@zilliqa-js/util';
 
 // Конфигурация для Mainnet
 const MAINNET_CONFIG = {
@@ -16,10 +15,9 @@ const MAINNET_CONFIG = {
 interface NodeStakeInfo {
     ssnName: string;
     ssnAddress: string;
-    stakeAmount: string;
-    stakeAmountZil: string;
-    rewardsZil: string; // <<< ДОБАВЛЕНО
-    commissionRate: string;
+    stakeAmount: bigint;
+    rewardsAmount: bigint;
+    commissionRate: bigint;
     status: string;
 }
 
@@ -28,7 +26,7 @@ interface BatchQueryResult {
     result: any;
 }
 
-// <<< НАЧАЛО: Логика расчета вознаграждений, адаптированная из Zillion
+// Интерфейс для данных, необходимых для расчета наград
 interface RewardCalculationData {
     lastRewardCycle: number;
     lastWithdrawCycleMap: any;
@@ -37,7 +35,6 @@ interface RewardCalculationData {
     buffDepositMaps: { [ssnAddress: string]: any };
     delegStakePerCycleMaps: { [ssnAddress: string]: any };
 }
-// <<< КОНЕЦ: Логика расчета вознаграждений, адаптированная из Zillion
 
 
 class ZilliqaStakeChecker {
@@ -55,7 +52,7 @@ class ZilliqaStakeChecker {
     private async batchQuery(queries: Array<[string, string, any[]]>): Promise<BatchQueryResult[]> {
         if (queries.length === 0) return [];
         const startTime = performance.now();
-        
+
         try {
             console.log(`🔍 Выполняется batch запрос (${queries.length} запросов)...`);
             
@@ -91,38 +88,14 @@ class ZilliqaStakeChecker {
     }
 
     /**
-     * Конвертирует Qa в ZIL с форматированием
+     * Рассчитывает невостребованные награды для всех узлов, используя BigInt.
      */
-    private formatZilAmount(qaAmount: string): string {
-        if (!qaAmount || qaAmount === '0') return '0.000';
-        const zil = units.fromQa(new BN(qaAmount), units.Units.Zil);
-        const zilBN = new BigNumber(zil);
-        const formatted = zilBN.toFixed(3);
-        const parts = formatted.split('.');
-        const formattedInteger = parts[0].replace(/\B(?=(\d{3})+(?!\d))/g, ',');
-        return `${formattedInteger}.${parts[1]}`;
-    }
-
-    /**
-     * Конвертирует комиссию из формата контракта в проценты
-     */
-    private formatCommissionRate(rate: string): string {
-        if (!rate) return '0.00';
-        const commRate = new BigNumber(rate).dividedBy(10**7);
-        return commRate.toFixed(2);
-    }
-
-    // <<< НАЧАЛО: Новая функция для расчета наград
-    /**
-     * Рассчитывает невостребованные награды для всех узлов.
-     * Эта функция воспроизводит логику из проекта Zillion.
-     */
-    private async calculateRewards(normalizedAddress: string, userDeposits: { [ssn: string]: string }, rewardData: RewardCalculationData): Promise<{ [ssnAddress: string]: BN }> {
-        console.log(`\n🧮 Расчет невостребованных наград...`);
-        const rewardsBySsn: { [ssnAddress: string]: BN } = {};
+    private async calculateRewards(normalizedAddress: string, userDeposits: { [ssn: string]: string }, rewardData: RewardCalculationData): Promise<{ [ssnAddress: string]: bigint }> {
+        console.log(`\n🧮 Расчет невостребованных наград (в Qa)...`);
+        const rewardsBySsn: { [ssnAddress: string]: bigint } = {};
 
         for (const ssnAddress of Object.keys(userDeposits)) {
-            let totalSsnReward = new BN(0);
+            let totalSsnReward = 0n; // Инициализация BigInt
 
             try {
                 // 1. Определить циклы для расчета
@@ -133,31 +106,24 @@ class ZilliqaStakeChecker {
                 }
 
                 if (cyclesToCalculate.length === 0) {
-                    rewardsBySsn[ssnAddress] = new BN(0);
+                    rewardsBySsn[ssnAddress] = 0n;
                     continue;
                 }
 
                 // 2. Рассчитать эффективный стейк делегатора для каждого цикла
-                const delegStakePerCycleMap = new Map<number, BN>();
+                const delegStakePerCycleMap = new Map<number, bigint>();
                 const directMap = rewardData.directDepositMaps[ssnAddress]?.direct_deposit_deleg?.[normalizedAddress]?.[ssnAddress] || {};
                 const buffMap = rewardData.buffDepositMaps[ssnAddress]?.buff_deposit_deleg?.[normalizedAddress]?.[ssnAddress] || {};
-                const historyMap = rewardData.delegStakePerCycleMaps[ssnAddress]?.deleg_stake_per_cycle?.[normalizedAddress]?.[ssnAddress] || {};
 
                 for (let cycle = 1; cycle <= rewardData.lastRewardCycle; cycle++) {
                     const c1 = cycle - 1;
                     const c2 = cycle - 2;
 
-                    const hist_amt = new BN(historyMap[c1.toString()] || 0);
-                    const dir_amt = new BN(directMap[c1.toString()] || 0);
-                    const buf_amt = new BN(buffMap[c2.toString()] || 0);
-                    
-                    const last_amt = delegStakePerCycleMap.get(c1) || new BN(0);
+                    const dir_amt = BigInt(directMap[c1.toString()] || 0);
+                    const buf_amt = BigInt(buffMap[c2.toString()] || 0);
+                    const last_amt = delegStakePerCycleMap.get(c1) || 0n;
 
-                    // Важно: в Zillion логике исторический стейк не суммируется с предыдущим, а заменяет его.
-                    // Логика такая: total = previous_total + direct + buffered.
-                    // Но `deleg_stake_per_cycle` уже хранит итоговую сумму за предыдущий цикл.
-                    // Поэтому `hist_amt` это и есть `last_amt`. Используем `last_amt`.
-                    const total_amt = last_amt.add(dir_amt).add(buf_amt);
+                    const total_amt = last_amt + dir_amt + buf_amt;
                     delegStakePerCycleMap.set(cycle, total_amt);
                 }
 
@@ -168,18 +134,19 @@ class ZilliqaStakeChecker {
                     const cycleInfo = ssnCycleInfoMap[cycle];
                     if (!cycleInfo) continue;
 
-                    const totalRewardsForCycle = new BN(cycleInfo.arguments[1]);
-                    const totalStakeForCycle = new BN(cycleInfo.arguments[0]);
+                    const totalRewardsForCycle = BigInt(cycleInfo.arguments[1]);
+                    const totalStakeForCycle = BigInt(cycleInfo.arguments[0]);
                     const delegStakeForCycle = delegStakePerCycleMap.get(cycle);
 
-                    if (delegStakeForCycle && !delegStakeForCycle.isZero() && !totalStakeForCycle.isZero()) {
-                        const cycleReward = delegStakeForCycle.mul(totalRewardsForCycle).div(totalStakeForCycle);
-                        totalSsnReward = totalSsnReward.add(cycleReward);
+                    if (delegStakeForCycle && delegStakeForCycle > 0n && totalStakeForCycle > 0n) {
+                        // Целочисленное деление, как и в смарт-контракте
+                        const cycleReward = (delegStakeForCycle * totalRewardsForCycle) / totalStakeForCycle;
+                        totalSsnReward += cycleReward;
                     }
                 }
             } catch (e) {
                 console.error(`- Ошибка при расчете наград для узла ${ssnAddress}:`, e);
-                totalSsnReward = new BN(0);
+                totalSsnReward = 0n;
             }
 
             rewardsBySsn[ssnAddress] = totalSsnReward;
@@ -188,8 +155,6 @@ class ZilliqaStakeChecker {
         console.log(`✅ Расчет наград завершен.`);
         return rewardsBySsn;
     }
-    // <<< КОНЕЦ: Новая функция для расчета наград
-
 
     /**
      * Получает все узлы с активным стейком для указанного адреса
@@ -197,34 +162,28 @@ class ZilliqaStakeChecker {
     async getStakedNodes(walletAddress: string): Promise<NodeStakeInfo[]> {
         console.log(`\n🚀 Поиск стейков для адреса: ${walletAddress}`);
         
-        // Нормализуем адрес
         const normalizedAddress = this.normalizeAddress(walletAddress);
         console.log(`📍 Нормализованный адрес: ${normalizedAddress}`);
 
-        // Подготавливаем ПЕРВЫЙ batch запрос
         const initialQueries: Array<[string, string, any[]]> = [
-            [this.implAddress, 'deposit_amt_deleg', [normalizedAddress]], // Депозиты пользователя
-            [this.implAddress, 'ssnlist', []], // Список всех узлов
-            [this.implAddress, 'lastrewardcycle', []], // <<<< НОВОЕ
-            [this.implAddress, 'last_withdraw_cycle_deleg', [normalizedAddress]], // <<<< НОВОЕ
+            [this.implAddress, 'deposit_amt_deleg', [normalizedAddress]],
+            [this.implAddress, 'ssnlist', []],
+            [this.implAddress, 'lastrewardcycle', []],
+            [this.implAddress, 'last_withdraw_cycle_deleg', [normalizedAddress]],
         ];
 
         try {
-            // Выполняем ПЕРВЫЙ batch запрос
             const initialResults = await this.batchQuery(initialQueries);
             
-            // Обрабатываем результаты
             const depositsResult = initialResults[0]?.result;
             const ssnListResult = initialResults[1]?.result;
-            const lastRewardCycleResult = initialResults[2]?.result; // <<<< НОВОЕ
-            const lastWithdrawResult = initialResults[3]?.result; // <<<< НОВОЕ
-
+            const lastRewardCycleResult = initialResults[2]?.result;
+            const lastWithdrawResult = initialResults[3]?.result;
 
             if (!depositsResult || !ssnListResult || !lastRewardCycleResult) {
                 throw new Error('Не удалось получить основные данные из контракта');
             }
 
-            // Получаем депозиты пользователя
             const userDeposits = depositsResult.deposit_amt_deleg?.[normalizedAddress];
             
             if (!userDeposits || Object.keys(userDeposits).length === 0) {
@@ -235,7 +194,7 @@ class ZilliqaStakeChecker {
             const ssnList = ssnListResult.ssnlist;
             if (!ssnList) throw new Error('Не удалось получить список узлов');
 
-            // --- НАЧАЛО: Подготовка и выполнение ВТОРОГО batch-запроса для данных по циклам ---
+            // --- Подготовка и выполнение ВТОРОГО batch-запроса для данных по циклам ---
             const rewardQueries: Array<[string, string, any[]]> = [];
             const stakedSsnAddresses = Object.keys(userDeposits);
 
@@ -264,7 +223,6 @@ class ZilliqaStakeChecker {
                 rewardData.buffDepositMaps[ssnAddr] = rewardQueryResults[queryIndex++]?.result;
                 rewardData.delegStakePerCycleMaps[ssnAddr] = rewardQueryResults[queryIndex++]?.result;
             }
-            // --- КОНЕЦ: ВТОРОЙ batch-запрос ---
             
             // Рассчитываем награды
             const rewardsBySsn = await this.calculateRewards(normalizedAddress, userDeposits, rewardData);
@@ -273,10 +231,10 @@ class ZilliqaStakeChecker {
             console.log('=' + '='.repeat(80));
 
             const stakedNodes: NodeStakeInfo[] = [];
-            let totalStaked = new BigNumber(0);
-            let totalRewards = new BigNumber(0); // <<<< НОВОЕ
+            let totalStaked = 0n;
+            let totalRewards = 0n;
 
-            for (const [ssnAddress, stakeAmount] of Object.entries(userDeposits)) {
+            for (const [ssnAddress, stakeAmountStr] of Object.entries(userDeposits)) {
                 const ssnInfo = ssnList[ssnAddress];
                 
                 if (!ssnInfo) {
@@ -286,47 +244,42 @@ class ZilliqaStakeChecker {
 
                 const ssnArgs = ssnInfo.arguments;
                 const ssnName = ssnArgs[3] || 'Неизвестно';
-                const commissionRate = this.formatCommissionRate(ssnArgs[7]);
+                const commissionRate = BigInt(ssnArgs[7] || '0'); // Комиссия как BigInt
                 const isActive = ssnArgs[0]?.constructor === 'True';
                 const status = isActive ? 'Активен' : 'Неактивен';
                 
-                const stakeAmountStr = stakeAmount as string;
-                const stakeAmountZil = this.formatZilAmount(stakeAmountStr);
-                const rewardsBN = rewardsBySsn[ssnAddress] || new BN(0); // <<<< НОВОЕ
-                const rewardsZil = this.formatZilAmount(rewardsBN.toString()); // <<<< НОВОЕ
+                const stakeAmount = BigInt(stakeAmountStr as string);
+                const rewardsAmount = rewardsBySsn[ssnAddress] || 0n;
                 
-                totalStaked = totalStaked.plus(new BigNumber(stakeAmountStr));
-                totalRewards = totalRewards.plus(rewardsBN); // <<<< НОВОЕ
+                totalStaked += stakeAmount;
+                totalRewards += rewardsAmount;
 
                 const nodeInfo: NodeStakeInfo = {
                     ssnName,
                     ssnAddress: toBech32Address(ssnAddress),
-                    stakeAmount: stakeAmountStr,
-                    stakeAmountZil,
-                    rewardsZil, // <<<< НОВОЕ
+                    stakeAmount,
+                    rewardsAmount,
                     commissionRate,
                     status
                 };
 
                 stakedNodes.push(nodeInfo);
 
-                // Выводим информацию
+                // Выводим информацию в целочисленном виде
                 console.log(`\n🎯 Узел: ${ssnName}`);
                 console.log(`    📍 Адрес: ${toBech32Address(ssnAddress)}`);
-                console.log(`    💰 Стейк: ${stakeAmountZil} ZIL`);
-                console.log(`    🎁 Награды: ${rewardsZil} ZIL`); // <<<< НОВОЕ
-                console.log(`    💹 Комиссия: ${commissionRate}%`);
+                console.log(`    💰 Стейк (Qa): ${stakeAmount.toString()}`);
+                console.log(`    🎁 Награды (Qa): ${rewardsAmount.toString()}`);
+                console.log(`    💹 Комиссия (10^7): ${commissionRate.toString()}`);
                 console.log(`    📊 Статус: ${status}`);
             }
 
             // Выводим общую статистику
-            const totalStakedZil = this.formatZilAmount(totalStaked.toString());
-            const totalRewardsZil = this.formatZilAmount(totalRewards.toString()); // <<<< НОВОЕ
             console.log('\n' + '=' + '='.repeat(80));
             console.log(`📈 ОБЩАЯ СТАТИСТИКА:`);
             console.log(`    🎯 Всего узлов со стейком: ${stakedNodes.length}`);
-            console.log(`    💰 Общая сумма стейка: ${totalStakedZil} ZIL`);
-            console.log(`    🎁 Общая сумма невостребованных наград: ${totalRewardsZil} ZIL`); // <<<< НОВОЕ
+            console.log(`    💰 Общая сумма стейка (Qa): ${totalStaked.toString()}`);
+            console.log(`    🎁 Общая сумма невостребованных наград (Qa): ${totalRewards.toString()}`);
             console.log(`    🌐 Сеть: Mainnet`);
             console.log('=' + '='.repeat(80));
 
@@ -342,7 +295,7 @@ class ZilliqaStakeChecker {
 
 // Основная функция
 async function main() {
-    console.log('🔥 Zilliqa Staking Checker v1.1 (with Rewards)\n');
+    console.log('🔥 Zilliqa Staking Checker v2.0 (BigInt Edition)\n');
     
     // Получаем адрес из аргументов командной строки
     const walletAddress = "zil1ruzwjhykmxlugf5a2wlm78z9cjv0u3rt0e84w2";
