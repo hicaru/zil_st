@@ -293,7 +293,7 @@ async function main() {
     
     // Получаем адрес из аргументов командной строки.
     // Адрес zil1ruzwjhykmxlugf5a2wlm78z9cjv0u3rt0e84w2 в hex-формате
-    const walletAddress = "0x1f04E95C96D9BFC4269D53bfBf1c45C498FE446B";
+    const walletAddress = "0x21899E4fF1d673E0dA1BCeCE6C4c4f2A2ef53c93";
     
     if (!walletAddress) {
         console.error('❌ Ошибка: Укажите адрес кошелька');
